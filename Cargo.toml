@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.23.3"
-tribles = "0.5.1"
+triblespace = { path = "../tribles-rust" }
 hex = "0.4.3"
 parking_lot = {version = "0.12.3", features=["arc_lock", "send_guard"]}
 macro_pub = "0.1.0"

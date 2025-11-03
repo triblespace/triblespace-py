@@ -12,8 +12,8 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyType},
 };
-use tribles::metadata::metadata;
-use tribles::{
+use triblespace::metadata::metadata;
+use triblespace::{
     id::IdOwner,
     prelude::*,
     query::{
@@ -201,7 +201,7 @@ pub fn register_from_blob_converter(
 
 #[pyfunction]
 pub fn metadata_description() -> PyTribleSet {
-    PyTribleSet(Mutex::new(tribles::metadata::metadata::description()))
+    PyTribleSet(Mutex::new(triblespace::metadata::metadata::description()))
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -669,7 +669,7 @@ pub fn solve(projected: Vec<Py<PyVariable>>, constraint: &PyConstraint) -> PyRes
         vec
     }) as Box<dyn Fn(&Binding) -> Vec<PyValue> + Send>;
 
-    let query = tribles::query::Query::new(constraint, postprocessing);
+    let query = triblespace::query::Query::new(constraint, postprocessing);
 
     Ok(PyQuery {
         query: Mutex::new(query),
