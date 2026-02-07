@@ -470,7 +470,7 @@ impl PyTribleSet {
     pub fn add(&self, e: &PyId, a: &PyId, v: &PyValue) -> PyResult<()> {
         self.0.lock().insert(
             &(Trible::new(
-                ExclusiveId::as_transmute_force(&e.0),
+                ExclusiveId::force_ref(&e.0),
                 &a.0,
                 Value::<UnknownValue>::as_transmute_raw(&v.value),
             )),
