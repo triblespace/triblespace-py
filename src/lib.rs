@@ -450,13 +450,13 @@ impl PyTribleSet {
 
     pub fn __add__(&self, other: &Self) -> Self {
         let mut result = self.0.lock().clone();
-        result.union(other.0.lock().clone());
+        result += other.0.lock().clone();
         PyTribleSet(Mutex::new(result))
     }
 
     pub fn __iadd__(&self, other: &Self) {
         let mut set = self.0.lock();
-        set.union(other.0.lock().clone());
+        *set += other.0.lock().clone();
     }
 
     pub fn __len__(&self) -> usize {
@@ -480,7 +480,8 @@ impl PyTribleSet {
 
     pub fn consume(&self, other: &Self) {
         let other_set: TribleSet = std::mem::replace(&mut other.0.lock(), TribleSet::new());
-        self.0.lock().union(other_set);
+        let mut set = self.0.lock();
+        *set += other_set;
     }
 
     pub fn pattern(
