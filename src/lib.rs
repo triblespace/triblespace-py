@@ -614,13 +614,17 @@ use ts_core::value::schemas::hash::Blake3;
 use ts_core::blob::schemas::simplearchive::SimpleArchive;
 
 #[pyclass(name = "Pile")]
-pub struct PyPile(Mutex<Option<Pile<Blake3>>>);
+pub struct PyPile {
+    path: String,
+    pile: Mutex<Option<Pile<Blake3>>>,
+}
 
 #[pymethods]
 impl PyPile {
     /// Open a pile file. Creates it if it doesn't exist.
     #[new]
     fn new(path: &str) -> PyResult<Self> {
+        let path_str = path.to_string();
         let path = std::path::Path::new(path);
         // Create file if it doesn't exist.
         if !path.exists() {
@@ -629,21 +633,20 @@ impl PyPile {
         }
         let pile = Pile::<Blake3>::open(path)
             .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
-        Ok(PyPile(Mutex::new(Some(pile))))
+        Ok(PyPile { path: path_str, pile: Mutex::new(Some(pile)) })
     }
 
     /// Close the pile, flushing pending writes.
     fn close(&self) -> PyResult<()> {
-        let pile = self.0.lock().take()
+        let pile = self.pile.lock().take()
             .ok_or_else(|| PyRuntimeError::new_err("pile already closed"))?;
         pile.close().map_err(|e| PyRuntimeError::new_err(format!("close: {e:?}")))?;
         Ok(())
     }
 
     /// Checkout a branch by name, returning its TribleSet.
-    fn checkout(&self, path: &str, branch_name: &str) -> PyResult<PyTribleSet> {
-        // Open a separate pile handle for the Repository (needs ownership).
-        let pile_path = std::path::Path::new(path);
+    fn checkout(&self, branch_name: &str) -> PyResult<PyTribleSet> {
+        let pile_path = std::path::Path::new(&self.path);
         let pile = Pile::<Blake3>::open(pile_path)
             .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
         let dummy_key = ts_core::id::rngid();
@@ -666,8 +669,8 @@ impl PyPile {
     }
 
     /// List all branch names.
-    fn branches(&self, path: &str) -> PyResult<Vec<String>> {
-        let pile_path = std::path::Path::new(path);
+    fn branches(&self) -> PyResult<Vec<String>> {
+        let pile_path = std::path::Path::new(&self.path);
         let mut pile = Pile::<Blake3>::open(pile_path)
             .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
 
@@ -699,10 +702,10 @@ impl PyPile {
     }
 
     fn __repr__(&self) -> String {
-        if self.0.lock().is_some() {
-            "Pile(open)".to_string()
+        if self.pile.lock().is_some() {
+            format!("Pile({:?})", self.path)
         } else {
-            "Pile(closed)".to_string()
+            format!("Pile({:?}, closed)", self.path)
         }
     }
 }
