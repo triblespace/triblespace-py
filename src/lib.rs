@@ -698,6 +698,28 @@ impl PyPile {
         Ok(names)
     }
 
+    /// Commit a TribleSet to a branch. Creates the branch if it doesn't exist.
+    fn commit(&self, branch_name: &str, data: &PyTribleSet) -> PyResult<()> {
+        let pile = self.pile.lock().take()
+            .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
+        let mut repo = Repository::new(pile, signing_key, TribleSet::new())
+            .map_err(|e| PyRuntimeError::new_err(format!("repo: {e:?}")))?;
+        let bid = repo.ensure_branch(branch_name, None)
+            .map_err(|e| PyRuntimeError::new_err(format!("branch: {e:?}")))?;
+        let mut ws = repo.pull(bid)
+            .map_err(|e| PyRuntimeError::new_err(format!("pull: {e:?}")))?;
+
+        // Create a commit with the data.
+        let data_set = data.0.lock().clone();
+        ws.commit(data_set, "python commit");
+        repo.push(&mut ws)
+            .map_err(|_| PyRuntimeError::new_err("push failed"))?;
+
+        *self.pile.lock() = Some(repo.into_storage());
+        Ok(())
+    }
+
     fn __repr__(&self) -> String {
         if self.pile.lock().is_some() {
             format!("Pile({:?})", self.path)
