@@ -245,6 +245,21 @@ impl PyId {
     pub fn to_hex(&self) -> String {
         hex::encode_upper(self.0)
     }
+
+    fn __repr__(&self) -> String {
+        format!("Id({})", &self.to_hex()[..8])
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.0.hash(&mut h);
+        h.finish()
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
 }
 
 #[pyclass(frozen, name = "IdOwner")]
@@ -497,6 +512,23 @@ impl PyValue {
         PyBytes::new(py, &self.value)
     }
 
+    fn __repr__(&self) -> String {
+        // Try as string first — but only if it's non-empty.
+        if let Ok(s) = self.to_str() {
+            if !s.is_empty() {
+                return format!("Value({s:?})");
+            }
+        }
+        // Try as Id (GenId — upper 16 bytes zero, lower 16 bytes non-zero).
+        if self.value[..16] == [0u8; 16] && self.value[16..] != [0u8; 16] {
+            if let Ok(id) = self.to_id() {
+                return format!("Value(Id({}))", &id.to_hex()[..8]);
+            }
+        }
+        // Fall back to hex.
+        format!("Value(0x{})", hex::encode(&self.value[..8]))
+    }
+
     pub fn bytes(&self) -> Cow<[u8]> {
         (&self.value).into()
     }
@@ -507,6 +539,11 @@ pub struct PyTribleSet(Mutex<TribleSet>);
 
 #[pymethods]
 impl PyTribleSet {
+    fn __repr__(&self) -> String {
+        let len = self.0.lock().len();
+        format!("TribleSet({len} tribles)")
+    }
+
     #[new]
     pub fn new() -> Self {
         PyTribleSet(Mutex::new(TribleSet::new()))
