@@ -43,6 +43,61 @@ from .triblespace import (
 SCHEMA_GENID = Id.hex("3BE6EEE252CD6A886B0E4E33F3D5BF3F")
 SCHEMA_SHORT_STRING = Id.hex("3E4174825DCB6A1C5D0B3F360753D648")
 
+# ── Variable + Constraint combinators ─────────────────────────────────
+
+# Shared variable context for the module.
+_var_ctx = VariableContext()
+_var_cache = {}
+
+
+def var(name):
+    """Get or create a named query variable.
+
+    Variables are module-global singletons by name — var('x') always
+    returns the same Variable.
+
+        e = ts.var('entity')
+        n = ts.var('name')
+    """
+    if name not in _var_cache:
+        v = _var_ctx.fresh_variable(name)
+        _var_cache[name] = v
+    return _var_cache[name]
+
+
+def vars(*names):
+    """Create multiple variables at once.
+
+        e, n, p = ts.vars('entity', 'name', 'phase')
+    """
+    return tuple(var(n) for n in names)
+
+
+def reset_vars():
+    """Reset the variable context. Call between independent queries."""
+    global _var_ctx, _var_cache
+    _var_ctx = VariableContext()
+    _var_cache = {}
+
+
+class ConstraintBuilder:
+    """Wraps a PyConstraint with & (and) and | (or) operators.
+
+        c = kb.where(e, name, n) & kb.where(e, phase, p)
+    """
+    __slots__ = ('_inner',)
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __and__(self, other):
+        if isinstance(other, ConstraintBuilder):
+            return ConstraintBuilder(intersect([self._inner, other._inner]))
+        return NotImplemented
+
+    def __repr__(self):
+        return f"Constraint(...)"
+
 class Fragment:
     """A set of facts about one entity, with its Id.
 
@@ -64,6 +119,80 @@ class Fragment:
 
     def __repr__(self):
         return f"Fragment({self.id.to_hex()[:8]}..., {len(self.facts)} tribles)"
+
+
+# ── TribleSet.where() for pattern building ────────────────────────────
+
+_hidden_counter = [0]
+
+def _ensure_var(spec):
+    """Convert a spec to a Variable, creating hidden vars for constants."""
+    if isinstance(spec, Variable):
+        return spec, []
+    # It's a constant — create a hidden variable + constant constraint.
+    _hidden_counter[0] += 1
+    hv = _var_ctx.fresh_variable(f"_h{_hidden_counter[0]}")
+    if isinstance(spec, Attribute):
+        hv.annotate_schemas(spec.schema, None)
+        return hv, [constant(hv._index(), Value.from_id(spec.id))]
+    elif isinstance(spec, Id):
+        hv.annotate_schemas(SCHEMA_GENID, None)
+        return hv, [constant(hv._index(), Value.from_id(spec))]
+    elif isinstance(spec, Value):
+        return hv, [constant(hv._index(), spec)]
+    elif isinstance(spec, str):
+        # Treat strings starting with ? as variables, otherwise as string constants.
+        if spec.startswith('?'):
+            return var(spec[1:]), []
+        hv.annotate_schemas(SCHEMA_SHORT_STRING, None)
+        return hv, [constant(hv._index(), Value.from_str(spec))]
+    raise TypeError(f"unexpected pattern element: {type(spec).__name__}")
+
+
+def _tribleset_where(self, entity, attribute, value):
+    """Build a constraint for a triple pattern.
+
+    Each position can be:
+    - Variable (from ts.var()) — free variable
+    - Attribute — fixed attribute
+    - Id — fixed entity or value
+    - Value — fixed value
+    - str starting with "?" — variable shorthand
+    - str — fixed ShortString value
+
+    Returns a ConstraintBuilder that supports & for intersection.
+
+        c = kb.where(e, name, n) & kb.where(e, phase, p)
+    """
+    ev, ec = _ensure_var(entity)
+    av, ac = _ensure_var(attribute)
+    vv, vc = _ensure_var(value)
+    pat = self.pattern(ev, av, vv)
+    all_constraints = [pat] + ec + ac + vc
+    if len(all_constraints) == 1:
+        return ConstraintBuilder(all_constraints[0])
+    return ConstraintBuilder(intersect(all_constraints))
+
+TribleSet.where = _tribleset_where
+
+
+def query(projected, constraint):
+    """Run a query. Returns an iterator of result rows.
+
+        for name, phase in ts.query([n, p], constraint):
+            print(name.to_str())
+    """
+    if isinstance(constraint, ConstraintBuilder):
+        constraint = constraint._inner
+    # Auto-annotate projected variables that don't have schemas yet.
+    proj_list = list(projected)
+    for v in proj_list:
+        if v.annotate_schemas is not None:
+            try:
+                v.annotate_schemas(SCHEMA_GENID, None)
+            except:
+                pass
+    return solve(proj_list, constraint)
 
 
 # Patch __add__ so kb + fragment works (returns new TribleSet).
