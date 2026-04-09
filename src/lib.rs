@@ -606,6 +606,107 @@ impl PyTribleSet {
     }
 }
 
+// ── Pile (persistent storage) ─────────────────────────────────────────
+
+use ts_core::repo::pile::Pile;
+use ts_core::repo::{BlobStore, BlobStorePut, BranchStore, Repository};
+use ts_core::value::schemas::hash::Blake3;
+use ts_core::blob::schemas::simplearchive::SimpleArchive;
+
+#[pyclass(name = "Pile")]
+pub struct PyPile(Mutex<Option<Pile<Blake3>>>);
+
+#[pymethods]
+impl PyPile {
+    /// Open a pile file. Creates it if it doesn't exist.
+    #[new]
+    fn new(path: &str) -> PyResult<Self> {
+        let path = std::path::Path::new(path);
+        // Create file if it doesn't exist.
+        if !path.exists() {
+            std::fs::File::create(path)
+                .map_err(|e| PyRuntimeError::new_err(format!("create: {e}")))?;
+        }
+        let pile = Pile::<Blake3>::open(path)
+            .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
+        Ok(PyPile(Mutex::new(Some(pile))))
+    }
+
+    /// Close the pile, flushing pending writes.
+    fn close(&self) -> PyResult<()> {
+        let pile = self.0.lock().take()
+            .ok_or_else(|| PyRuntimeError::new_err("pile already closed"))?;
+        pile.close().map_err(|e| PyRuntimeError::new_err(format!("close: {e:?}")))?;
+        Ok(())
+    }
+
+    /// Checkout a branch by name, returning its TribleSet.
+    fn checkout(&self, path: &str, branch_name: &str) -> PyResult<PyTribleSet> {
+        // Open a separate pile handle for the Repository (needs ownership).
+        let pile_path = std::path::Path::new(path);
+        let pile = Pile::<Blake3>::open(pile_path)
+            .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
+        let dummy_key = ts_core::id::rngid();
+        let signing_key = {
+            let mut bytes = [0u8; 32];
+            let raw: [u8; 16] = dummy_key.id.into();
+            bytes[..16].copy_from_slice(&raw);
+            ed25519_dalek::SigningKey::from_bytes(&bytes)
+        };
+        let mut repo = Repository::new(pile, signing_key, TribleSet::new())
+            .map_err(|e| PyRuntimeError::new_err(format!("repo: {e:?}")))?;
+        let bid = repo.ensure_branch(branch_name, None)
+            .map_err(|e| PyRuntimeError::new_err(format!("branch: {e:?}")))?;
+        let mut ws = repo.pull(bid)
+            .map_err(|e| PyRuntimeError::new_err(format!("pull: {e:?}")))?;
+        let head = ws.head().ok_or_else(|| PyRuntimeError::new_err("branch has no commits"))?;
+        let co = ws.checkout(ts_core::repo::ancestors(head))
+            .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
+        Ok(PyTribleSet(Mutex::new(co.into_facts())))
+    }
+
+    /// List all branch names.
+    fn branches(&self, path: &str) -> PyResult<Vec<String>> {
+        let pile_path = std::path::Path::new(path);
+        let mut pile = Pile::<Blake3>::open(pile_path)
+            .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
+
+        let branch_ids: Vec<Id> = pile.branches()
+            .map_err(|e| PyRuntimeError::new_err(format!("branches: {e:?}")))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut names = Vec::new();
+        for bid in branch_ids {
+            let Some(head) = pile.head(bid)
+                .map_err(|e| PyRuntimeError::new_err(format!("head: {e:?}")))? else { continue };
+
+            let reader = pile.reader()
+                .map_err(|e| PyRuntimeError::new_err(format!("reader: {e:?}")))?;
+            let Ok(meta) = reader.get::<TribleSet, SimpleArchive>(head) else { continue };
+
+            use ts_core::blob::schemas::longstring::LongString;
+            use ts_core::value::schemas::hash::Handle;
+            let name_handle = find!(
+                h: Value<Handle<Blake3, LongString>>,
+                pattern!(&meta, [{ _?e @ ts_core::metadata::name: ?h }])
+            ).next();
+            let Some(nh) = name_handle else { continue };
+            let Ok(name_view) = reader.get::<anybytes::View<str>, LongString>(nh) else { continue };
+            names.push(name_view.as_ref().to_string());
+        }
+        Ok(names)
+    }
+
+    fn __repr__(&self) -> String {
+        if self.0.lock().is_some() {
+            "Pile(open)".to_string()
+        } else {
+            "Pile(closed)".to_string()
+        }
+    }
+}
+
 pub struct InnerVariable {
     index: usize,
     name: String,
@@ -811,6 +912,7 @@ pub fn triblespace_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVariableContext>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyQuery>()?;
+    m.add_class::<PyPile>()?;
     m.add_function(wrap_pyfunction!(register_type, m)?)?;
     m.add_function(wrap_pyfunction!(register_to_value_converter, m)?)?;
     m.add_function(wrap_pyfunction!(register_from_value_converter, m)?)?;

@@ -2034,6 +2034,8 @@ dependencies = [
 name = "triblespace-py"
 version = "0.1.0"
 dependencies = [
+ "anybytes",
+ "ed25519-dalek",
  "hex",
  "itertools 0.13.0",
  "macro_pub",

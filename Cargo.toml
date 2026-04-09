@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 pyo3 = "0.23.3"
 triblespace = { path = "../triblespace-rs" }
 hex = "0.4.3"
+ed25519-dalek = "2.2.0"
+anybytes = { version = "0.20.2", features = ["zerocopy"] }
 parking_lot = {version = "0.12.3", features=["arc_lock", "send_guard"]}
 macro_pub = "0.1.0"
 itertools = "0.13.0"
