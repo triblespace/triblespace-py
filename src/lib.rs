@@ -448,6 +448,55 @@ impl PyValue {
         self._blob_schema.is_some()
     }
 
+    /// Create a Value from a short string (max 31 bytes UTF-8).
+    #[staticmethod]
+    fn from_str(s: &str) -> PyResult<Self> {
+        let val: Value<valueschemas::ShortString> = TryToValue::try_to_value(s)
+            .map_err(|_| PyValueError::new_err("string too long for ShortString (max 31 bytes)"))?;
+        // Use a well-known schema ID for ShortString.
+        let schema_id = <valueschemas::ShortString as ConstId>::ID;
+        Ok(PyValue {
+            value: val.raw,
+            _value_schema: schema_id,
+            _blob_schema: None,
+        })
+    }
+
+    /// Extract a short string from this Value.
+    fn to_str(&self) -> PyResult<String> {
+        let val = Value::<valueschemas::ShortString>::new(self.value);
+        let s: String = TryFromValue::try_from_value(&val)
+            .map_err(|_| PyValueError::new_err("not a valid ShortString"))?;
+        Ok(s)
+    }
+
+    /// Create a Value from an Id (GenId schema — 16 zero bytes + 16-byte id).
+    #[staticmethod]
+    fn from_id(id: &PyId) -> PyResult<Self> {
+        let mut raw = [0u8; 32];
+        let id_bytes: [u8; 16] = id.0.into();
+        raw[16..32].copy_from_slice(&id_bytes);
+        let schema_id = <valueschemas::GenId as ConstId>::ID;
+        Ok(PyValue {
+            value: raw,
+            _value_schema: schema_id,
+            _blob_schema: None,
+        })
+    }
+
+    /// Extract an Id from this Value (GenId schema).
+    fn to_id(&self) -> PyResult<PyId> {
+        let val = Value::<valueschemas::GenId>::new(self.value);
+        let id: Id = TryFromValue::try_from_value(&val)
+            .map_err(|_| PyValueError::new_err("not a valid GenId"))?;
+        Ok(PyId(id))
+    }
+
+    /// Get raw 32-byte value.
+    pub fn raw_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.value)
+    }
+
     pub fn bytes(&self) -> Cow<[u8]> {
         (&self.value).into()
     }
