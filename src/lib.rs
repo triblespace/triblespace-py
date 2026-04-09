@@ -97,26 +97,25 @@ pub fn get_blob_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<Option
     }
 }
 
+/// Returns pairs of (attr_id, name_handle_hex) for all named attributes.
+/// The name_handle is a 32-byte blob reference that can be resolved
+/// via a blob store to get the actual string.
 #[pyfunction]
-pub fn get_label_names(context: &PyTribleSet) -> PyResult<HashMap<String, PyId>> {
+pub fn get_label_name_handles(context: &PyTribleSet) -> PyResult<Vec<(PyId, String)>> {
     let data = context.0.lock();
-    find!((name: String, attr_id: Id),
-    pattern!(&*data, [
-        {?attr_id @
-            metadata::name: ?name
-        }]))
-    .into_group_map()
-    .into_iter()
-    .map(|(name, ids)| {
-        if ids.len() > 1 {
-            Err(PyErr::new::<PyKeyError, _>(
-                "multiple attributes with the same name",
-            ))
-        } else {
-            Ok((name, PyId(ids[0])))
-        }
-    })
-    .collect()
+    use ts_core::value::Value;
+    use ts_core::value::schemas::hash::{Blake3, Handle};
+    use ts_core::blob::schemas::longstring::LongString;
+    let results: Vec<(PyId, String)> = find!(
+        (attr_id: Id, name_handle: Value<Handle<Blake3, LongString>>),
+        pattern!(&*data, [{
+            ?attr_id @
+            metadata::name: ?name_handle
+        }])
+    )
+    .map(|(aid, nh)| (PyId(aid), hex::encode_upper(nh.raw)))
+    .collect();
+    Ok(results)
 }
 
 #[pyfunction]
@@ -203,7 +202,8 @@ pub fn register_from_blob_converter(
 
 #[pyfunction]
 pub fn metadata_description() -> PyTribleSet {
-    PyTribleSet(Mutex::new(triblespace::metadata::metadata::description()))
+    // TODO: use the Describe trait to build metadata description
+    PyTribleSet(Mutex::new(TribleSet::new()))
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -371,6 +371,19 @@ pub struct PyValue {
 
 #[pymethods]
 impl PyValue {
+    /// Create a raw value from 32 bytes.
+    #[new]
+    fn new(bytes: &[u8]) -> PyResult<Self> {
+        if bytes.len() != 32 {
+            return Err(PyValueError::new_err("values must be 32 bytes"));
+        }
+        let mut raw = [0u8; 32];
+        raw.copy_from_slice(bytes);
+        // Use a dummy schema for raw values.
+        let dummy_schema = Id::new([0xFF; 16]).unwrap();
+        Ok(PyValue { value: raw, _value_schema: dummy_schema, _blob_schema: None })
+    }
+
     #[pyo3(signature = (value, value_schema, blob_schema=None))]
     #[staticmethod]
     fn of(
@@ -445,6 +458,11 @@ pub struct PyTribleSet(Mutex<TribleSet>);
 
 #[pymethods]
 impl PyTribleSet {
+    #[new]
+    pub fn new() -> Self {
+        PyTribleSet(Mutex::new(TribleSet::new()))
+    }
+
     #[staticmethod]
     pub fn empty() -> Self {
         PyTribleSet(Mutex::new(TribleSet::new()))
@@ -612,7 +630,7 @@ pub struct PyQuery {
     query: Mutex<
         Query<
             Arc<dyn Constraint<'static> + Send + Sync>,
-            Box<dyn Fn(&Binding) -> Vec<PyValue> + Send>,
+            Box<dyn Fn(&Binding) -> Option<Vec<PyValue>> + Send>,
             Vec<PyValue>,
         >,
     >,
@@ -636,7 +654,8 @@ pub fn constant(index: usize, constant: &Bound<'_, PyValue>) -> PyConstraint {
 
 /// Build a constraint for the intersection of the provided constraints.
 #[pyfunction]
-pub fn intersect(constraints: Vec<Py<PyConstraint>>) -> PyConstraint {
+#[pyo3(name = "intersect")]
+pub fn py_intersect(constraints: Vec<Py<PyConstraint>>) -> PyConstraint {
     let constraints = constraints
         .iter()
         .map(|py| py.get().constraint.clone())
@@ -669,10 +688,10 @@ pub fn solve(projected: Vec<Py<PyVariable>>, constraint: &PyConstraint) -> PyRes
                 _blob_schema: v.0.read()._blob_schema,
             });
         }
-        vec
-    }) as Box<dyn Fn(&Binding) -> Vec<PyValue> + Send>;
+        Some(vec)
+    }) as Box<dyn Fn(&Binding) -> Option<Vec<PyValue>> + Send>;
 
-    let query = triblespace::query::Query::new(constraint, postprocessing);
+    let query = ts_core::query::Query::new(constraint, postprocessing);
 
     Ok(PyQuery {
         query: Mutex::new(query),
@@ -691,8 +710,8 @@ impl PyQuery {
 
 /// The `tribles` python module.
 #[pymodule]
-#[pyo3(name = "tribles")]
-pub fn tribles_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pyo3(name = "triblespace")]
+pub fn triblespace_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTribleSet>()?;
     m.add_class::<PyId>()?;
     m.add_class::<PyIdOwner>()?;
@@ -708,10 +727,10 @@ pub fn tribles_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(register_from_blob_converter, m)?)?;
     m.add_function(wrap_pyfunction!(get_value_schema, m)?)?;
     m.add_function(wrap_pyfunction!(get_blob_schema, m)?)?;
-    m.add_function(wrap_pyfunction!(get_label_names, m)?)?;
+    m.add_function(wrap_pyfunction!(get_label_name_handles, m)?)?;
     m.add_function(wrap_pyfunction!(metadata_description, m)?)?;
     m.add_function(wrap_pyfunction!(constant, m)?)?;
-    m.add_function(wrap_pyfunction!(intersect, m)?)?;
+    m.add_function(wrap_pyfunction!(py_intersect, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_submodule(m)?;
     Ok(())
