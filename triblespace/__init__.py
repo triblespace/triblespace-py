@@ -43,6 +43,51 @@ from .triblespace import (
 SCHEMA_GENID = Id.hex("3BE6EEE252CD6A886B0E4E33F3D5BF3F")
 SCHEMA_SHORT_STRING = Id.hex("3E4174825DCB6A1C5D0B3F360753D648")
 
+class Fragment:
+    """A set of facts about one entity, with its Id.
+
+    Returned by entity(). Supports += to union into a TribleSet.
+
+        alice = ts.entity({name: "Alice"})
+        alice.id     # the entity's Id
+        kb += alice  # unions facts into kb
+        len(alice)   # number of tribles
+    """
+    __slots__ = ('id', 'facts')
+
+    def __init__(self, entity_id, facts):
+        self.id = entity_id
+        self.facts = facts
+
+    def __len__(self):
+        return len(self.facts)
+
+    def __repr__(self):
+        return f"Fragment({self.id.to_hex()[:8]}..., {len(self.facts)} tribles)"
+
+
+# Patch __add__ so kb + fragment works (returns new TribleSet).
+_original_add = TribleSet.__add__
+
+def _patched_add(self, other):
+    if isinstance(other, Fragment):
+        return _original_add(self, other.facts)
+    return _original_add(self, other)
+
+TribleSet.__add__ = _patched_add
+
+# Patch consume so kb.consume(fragment) works for in-place mutation.
+_original_consume = TribleSet.consume
+
+def _patched_consume(self, other):
+    if isinstance(other, Fragment):
+        _original_consume(self, other.facts)
+    else:
+        _original_consume(self, other)
+
+TribleSet.consume = _patched_consume
+
+
 class Attribute:
     """A named attribute with a known schema.
 
@@ -181,21 +226,19 @@ def _coerce_value(val, attr=None):
 
 
 def entity(facts, *, id=None):
-    """Build a TribleSet for one entity. Auto-mints an Id if not provided.
+    """Build a Fragment for one entity. Auto-mints an Id if not provided.
 
-    Returns (entity_id, tribleset) — union into your KB with +=.
+    Returns a Fragment — union into your KB with +=.
 
     Values auto-converted: str→ShortString, Id→GenId, Value→as-is.
 
     Example:
-        alice_id, alice_facts = ts.entity({name: "Alice", friend: bob})
-        kb += alice_facts
-
-        # Or inline:
-        kb += ts.entity({name: "Bob"})[1]
+        alice = ts.entity({name: "Alice", friend: bob.id})
+        kb += alice
+        print(alice.id)  # the entity's Id
     """
     eid = id if id is not None else mint_id()
-    ts = TribleSet()
+    result = TribleSet()
     for attr, val in facts.items():
         if isinstance(attr, Attribute):
             attr_id = attr.id
@@ -203,5 +246,5 @@ def entity(facts, *, id=None):
             attr_id = attr
         else:
             raise TypeError(f"attribute must be Attribute or Id, got {type(attr).__name__}")
-        ts.add(eid, attr_id, _coerce_value(val, attr))
-    return eid, ts
+        result.add(eid, attr_id, _coerce_value(val, attr))
+    return Fragment(eid, result)
