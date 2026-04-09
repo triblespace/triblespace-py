@@ -244,13 +244,16 @@ class Attribute:
         name_attr = Attribute("name", guard)
         kb.add(entity, name_attr.id, Value.from_str("Alice"))
     """
-    def __init__(self, label, guard=None, *, id=None, is_id=False, schema=None):
+    def __init__(self, label=None, *, id=None, is_id=False, schema=None):
         if id is not None:
             self.id = id
-        elif guard is not None:
-            self.id = guard.rngid()
+        elif label is not None:
+            # Deterministic ID from attribute name.
+            import hashlib
+            h = hashlib.blake2b(label.encode(), digest_size=16).digest()
+            self.id = Id(h)
         else:
-            self.id = mint_id()
+            raise ValueError("provide label (for derived id) or id= (explicit)")
         self.label = label
         if schema is not None:
             self.schema = schema
@@ -358,46 +361,6 @@ def mint_id():
     guard = _default_owner.lock()
     return guard.rngid()
 
-
-class Schema:
-    """A collection of named Attributes with stable IDs.
-
-    Define once, use everywhere. IDs are deterministic from the schema
-    name + attribute name (hashed), so they're stable across sessions.
-
-        schema = ts.Schema('clinical_trials',
-            trial_id=dict(),
-            phase=dict(),
-            sponsor=dict(),
-            indication=dict(),
-            related_trial=dict(is_id=True),
-        )
-        schema.trial_id  # Attribute with stable ID
-    """
-    def __init__(self, namespace, **attrs):
-        self._namespace = namespace
-        self._attrs = {}
-        for name, opts in attrs.items():
-            # Deterministic ID from namespace + attribute name.
-            seed = f"{namespace}:{name}".encode()
-            import hashlib
-            h = hashlib.blake2b(seed, digest_size=16).digest()
-            attr_id = Id(h)
-            is_id = opts.get('is_id', False)
-            schema = opts.get('schema', None)
-            attr = Attribute(name, id=attr_id, is_id=is_id, schema=schema)
-            self._attrs[name] = attr
-
-    def __getattr__(self, name):
-        if name.startswith('_'):
-            return super().__getattribute__(name)
-        if name in self._attrs:
-            return self._attrs[name]
-        raise AttributeError(f"Schema '{self._namespace}' has no attribute '{name}'")
-
-    def __repr__(self):
-        attrs = ', '.join(self._attrs.keys())
-        return f"Schema({self._namespace!r}, [{attrs}])"
 
 
 def _coerce_value(val, attr=None):
