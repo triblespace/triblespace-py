@@ -99,26 +99,44 @@ class ConstraintBuilder:
         return f"Constraint(...)"
 
 class Fragment:
-    """A set of facts about one entity, with its Id.
+    """A set of facts with exported entity Ids.
 
-    Returned by entity(). Supports += to union into a TribleSet.
+    Returned by entity(). Composable with + and +=.
 
         alice = ts.entity({name: "Alice"})
-        alice.id     # the entity's Id
-        kb += alice  # unions facts into kb
-        len(alice)   # number of tribles
-    """
-    __slots__ = ('id', 'facts')
+        bob = ts.entity({name: "Bob"})
 
-    def __init__(self, entity_id, facts):
-        self.id = entity_id
+        alice.id          # single entity's Id
+        alice.ids         # list of all exported Ids
+
+        combined = alice + bob
+        combined.ids      # [alice.id, bob.id]
+
+        kb = kb + combined  # unions all facts into kb
+    """
+    __slots__ = ('ids', 'facts')
+
+    def __init__(self, ids, facts):
+        self.ids = ids if isinstance(ids, list) else [ids]
         self.facts = facts
+
+    @property
+    def id(self):
+        """The root entity Id (first exported Id)."""
+        return self.ids[0] if self.ids else None
+
+    def __add__(self, other):
+        if isinstance(other, Fragment):
+            return Fragment(self.ids + other.ids, self.facts + other.facts)
+        return NotImplemented
 
     def __len__(self):
         return len(self.facts)
 
     def __repr__(self):
-        return f"Fragment({self.id.to_hex()[:8]}..., {len(self.facts)} tribles)"
+        n = len(self.ids)
+        ids_str = self.ids[0].to_hex()[:8] if n == 1 else f"{n} entities"
+        return f"Fragment({ids_str}..., {len(self.facts)} tribles)"
 
 
 # ── TribleSet.where() for pattern building ────────────────────────────
