@@ -463,6 +463,17 @@ impl PyValue {
         self._blob_schema.is_some()
     }
 
+    fn __hash__(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.value.hash(&mut h);
+        h.finish()
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+
     /// Create a Value from a short string (max 31 bytes UTF-8).
     #[staticmethod]
     fn from_str(s: &str) -> PyResult<Self> {
@@ -588,6 +599,30 @@ impl PyTribleSet {
         let other_set: TribleSet = std::mem::replace(&mut other.0.lock(), TribleSet::new());
         let mut set = self.0.lock();
         *set += other_set;
+    }
+
+    /// Iterate all triples as (entity: Id, attribute: Id, value: Value) tuples.
+    pub fn triples(&self) -> Vec<(PyId, PyId, PyValue)> {
+        let set = self.0.lock();
+        let mut result = Vec::new();
+        for trible in set.eav.iter() {
+            let mut e_raw = [0u8; 16];
+            let mut a_raw = [0u8; 16];
+            let mut v_raw = [0u8; 32];
+            e_raw.copy_from_slice(&trible[..16]);
+            a_raw.copy_from_slice(&trible[16..32]);
+            v_raw.copy_from_slice(&trible[32..64]);
+            let e = Id::new(e_raw).unwrap();
+            let a = Id::new(a_raw).unwrap();
+            // Use a dummy schema for iteration — caller interprets.
+            let dummy = Id::new([0xFF; 16]).unwrap();
+            result.push((
+                PyId(e),
+                PyId(a),
+                PyValue { value: v_raw, _value_schema: dummy, _blob_schema: None },
+            ));
+        }
+        result
     }
 
     pub fn pattern(
