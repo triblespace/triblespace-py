@@ -613,6 +613,11 @@ pub struct PyVariable(RwLock<InnerVariable>);
 
 #[pymethods]
 impl PyVariable {
+    /// Get the variable's index (for use with `constant()`).
+    pub fn _index(&self) -> usize {
+        self.0.read().index
+    }
+
     #[new]
     pub fn new(index: usize, name: String) -> Self {
         PyVariable(RwLock::new(InnerVariable {
