@@ -720,6 +720,17 @@ impl PyPile {
         Ok(())
     }
 
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __exit__(&self, _exc_type: Option<&Bound<'_, PyAny>>, _exc_val: Option<&Bound<'_, PyAny>>, _exc_tb: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+        if let Some(pile) = self.pile.lock().take() {
+            let _ = pile.close();
+        }
+        Ok(false)
+    }
+
     fn __repr__(&self) -> String {
         if self.pile.lock().is_some() {
             format!("Pile({:?})", self.path)
