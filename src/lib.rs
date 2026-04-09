@@ -646,16 +646,10 @@ impl PyPile {
 
     /// Checkout a branch by name, returning its TribleSet.
     fn checkout(&self, branch_name: &str) -> PyResult<PyTribleSet> {
-        let pile_path = std::path::Path::new(&self.path);
-        let pile = Pile::<Blake3>::open(pile_path)
-            .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
-        let dummy_key = ts_core::id::rngid();
-        let signing_key = {
-            let mut bytes = [0u8; 32];
-            let raw: [u8; 16] = dummy_key.id.into();
-            bytes[..16].copy_from_slice(&raw);
-            ed25519_dalek::SigningKey::from_bytes(&bytes)
-        };
+        // Take the pile out temporarily — Repository needs ownership.
+        let pile = self.pile.lock().take()
+            .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
         let mut repo = Repository::new(pile, signing_key, TribleSet::new())
             .map_err(|e| PyRuntimeError::new_err(format!("repo: {e:?}")))?;
         let bid = repo.ensure_branch(branch_name, None)
@@ -665,14 +659,17 @@ impl PyPile {
         let head = ws.head().ok_or_else(|| PyRuntimeError::new_err("branch has no commits"))?;
         let co = ws.checkout(ts_core::repo::ancestors(head))
             .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
-        Ok(PyTribleSet(Mutex::new(co.into_facts())))
+        let result = co.into_facts();
+        // Put the pile back.
+        *self.pile.lock() = Some(repo.into_storage());
+        Ok(PyTribleSet(Mutex::new(result)))
     }
 
     /// List all branch names.
     fn branches(&self) -> PyResult<Vec<String>> {
-        let pile_path = std::path::Path::new(&self.path);
-        let mut pile = Pile::<Blake3>::open(pile_path)
-            .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
+        let mut guard = self.pile.lock();
+        let pile = guard.as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
 
         let branch_ids: Vec<Id> = pile.branches()
             .map_err(|e| PyRuntimeError::new_err(format!("branches: {e:?}")))?
