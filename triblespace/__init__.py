@@ -67,6 +67,15 @@ class Attribute:
         else:
             self.schema = SCHEMA_SHORT_STRING
 
+    def __hash__(self):
+        return hash(self.id.to_hex())
+
+    def __eq__(self, other):
+        return isinstance(other, Attribute) and self.id.to_hex() == other.id.to_hex()
+
+    def __repr__(self):
+        return f"Attribute({self.label!r}, {self.id.to_hex()[:8]}...)"
+
 
 def find(kb, *pattern_spec):
     """Pythonic query interface.
@@ -145,3 +154,50 @@ def find(kb, *pattern_spec):
     combined = intersect(constraints) if len(constraints) > 1 else constraints[0]
     q = solve(proj_vars, combined)
     return q
+
+
+def _coerce_value(val, attr=None):
+    """Auto-convert Python values to triblespace Values."""
+    if isinstance(val, Value):
+        return val
+    if isinstance(val, str):
+        return Value.from_str(val)
+    if isinstance(val, Id):
+        return Value.from_id(val)
+    if isinstance(val, (int, float)):
+        return Value.from_str(str(val))
+    raise TypeError(f"can't coerce {type(val).__name__} to Value")
+
+
+def entity(kb, entity_id, facts):
+    """Add multiple attribute-value pairs for an entity.
+
+    facts: dict mapping Attribute (or Id) → value
+    Values auto-converted: str→ShortString, Id→GenId, Value→as-is
+
+    Example:
+        ts.entity(kb, alice, {
+            name: "Alice",
+            age: "30",
+            friend: bob,
+        })
+    """
+    for attr, val in facts.items():
+        if isinstance(attr, Attribute):
+            attr_id = attr.id
+        elif isinstance(attr, Id):
+            attr_id = attr
+        else:
+            raise TypeError(f"attribute must be Attribute or Id, got {type(attr).__name__}")
+        kb.add(entity_id, attr_id, _coerce_value(val, attr))
+
+
+def add_entity(kb, guard, facts):
+    """Create a new entity with the given facts. Returns the entity Id.
+
+    Example:
+        alice = ts.add_entity(kb, guard, {name: "Alice", friend: bob})
+    """
+    eid = guard.rngid()
+    entity(kb, eid, facts)
+    return eid
