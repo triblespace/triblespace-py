@@ -12,16 +12,15 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyType},
 };
-use triblespace::metadata::metadata;
-use triblespace::{
-    id::IdOwner,
-    prelude::*,
-    query::{
-        constantconstraint::ConstantConstraint, Binding, Constraint, ContainsConstraint, Query,
-        TriblePattern, Variable,
-    },
-    value::{schemas::UnknownValue, RawValue},
+use triblespace::core as ts_core;
+use ts_core::metadata;
+use ts_core::id::IdOwner;
+use triblespace::prelude::*;
+use ts_core::query::{
+    constantconstraint::ConstantConstraint, Binding, Constraint, ContainsConstraint, Query,
+    TriblePattern, Variable,
 };
+use ts_core::value::{schemas::UnknownValue, RawValue};
 
 use hex::FromHex;
 
@@ -58,10 +57,11 @@ static FROM_BLOB_CONVERTERS: LazyLock<Mutex<HashMap<(Id, Id), Py<PyAny>>>> =
 
 #[pyfunction]
 pub fn get_value_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<PyId> {
+    let data = context.0.lock();
     match find!((value_schema: Id),
-    metadata::pattern!(&context.0.lock(), [
-        {(attr_id.0) @
-            attr_value_schema: value_schema}
+    pattern!(&*data, [
+        {&(attr_id.0) @
+            metadata::value_schema: ?value_schema}
     ]))
     .exactly_one()
     {
@@ -79,10 +79,11 @@ pub fn get_value_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<PyId>
 
 #[pyfunction]
 pub fn get_blob_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<Option<PyId>> {
+    let data = context.0.lock();
     match find!((blob_schema: Id),
-    metadata::pattern!(&context.0.lock(), [
-        {(attr_id.0) @
-            attr_blob_schema: blob_schema}
+    pattern!(&*data, [
+        {&(attr_id.0) @
+            metadata::blob_schema: ?blob_schema}
     ]))
     .at_most_one()
     {
@@ -98,10 +99,11 @@ pub fn get_blob_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<Option
 
 #[pyfunction]
 pub fn get_label_names(context: &PyTribleSet) -> PyResult<HashMap<String, PyId>> {
+    let data = context.0.lock();
     find!((name: String, attr_id: Id),
-    metadata::pattern!(&context.0.lock(), [
-        {attr_id @
-            attr_name: name
+    pattern!(&*data, [
+        {?attr_id @
+            metadata::name: ?name
         }]))
     .into_group_map()
     .into_iter()
