@@ -58,7 +58,7 @@ class Attribute:
         elif guard is not None:
             self.id = guard.rngid()
         else:
-            raise ValueError("provide either guard (to mint) or id (existing)")
+            self.id = mint_id()
         self.label = label
         if schema is not None:
             self.schema = schema
@@ -156,6 +156,17 @@ def find(kb, *pattern_spec):
     return q
 
 
+# Module-level owner for convenience. Users who need explicit ownership
+# can still use IdOwner/guard directly.
+_default_owner = IdOwner()
+
+
+def mint_id():
+    """Mint a new random Id."""
+    guard = _default_owner.lock()
+    return guard.rngid()
+
+
 def _coerce_value(val, attr=None):
     """Auto-convert Python values to triblespace Values."""
     if isinstance(val, Value):
@@ -192,12 +203,12 @@ def entity(kb, entity_id, facts):
         kb.add(entity_id, attr_id, _coerce_value(val, attr))
 
 
-def add_entity(kb, guard, facts):
+def add_entity(kb, facts):
     """Create a new entity with the given facts. Returns the entity Id.
 
     Example:
-        alice = ts.add_entity(kb, guard, {name: "Alice", friend: bob})
+        alice = ts.add_entity(kb, {name: "Alice", friend: bob})
     """
-    eid = guard.rngid()
+    eid = mint_id()
     entity(kb, eid, facts)
     return eid
