@@ -180,19 +180,22 @@ def _coerce_value(val, attr=None):
     raise TypeError(f"can't coerce {type(val).__name__} to Value")
 
 
-def entity(kb, entity_id, facts):
-    """Add multiple attribute-value pairs for an entity.
+def entity(facts, *, id=None):
+    """Build a TribleSet for one entity. Auto-mints an Id if not provided.
 
-    facts: dict mapping Attribute (or Id) → value
-    Values auto-converted: str→ShortString, Id→GenId, Value→as-is
+    Returns (entity_id, tribleset) — union into your KB with +=.
+
+    Values auto-converted: str→ShortString, Id→GenId, Value→as-is.
 
     Example:
-        ts.entity(kb, alice, {
-            name: "Alice",
-            age: "30",
-            friend: bob,
-        })
+        alice_id, alice_facts = ts.entity({name: "Alice", friend: bob})
+        kb += alice_facts
+
+        # Or inline:
+        kb += ts.entity({name: "Bob"})[1]
     """
+    eid = id if id is not None else mint_id()
+    ts = TribleSet()
     for attr, val in facts.items():
         if isinstance(attr, Attribute):
             attr_id = attr.id
@@ -200,15 +203,5 @@ def entity(kb, entity_id, facts):
             attr_id = attr
         else:
             raise TypeError(f"attribute must be Attribute or Id, got {type(attr).__name__}")
-        kb.add(entity_id, attr_id, _coerce_value(val, attr))
-
-
-def add_entity(kb, facts):
-    """Create a new entity with the given facts. Returns the entity Id.
-
-    Example:
-        alice = ts.add_entity(kb, {name: "Alice", friend: bob})
-    """
-    eid = mint_id()
-    entity(kb, eid, facts)
-    return eid
+        ts.add(eid, attr_id, _coerce_value(val, attr))
+    return eid, ts
