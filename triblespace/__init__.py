@@ -244,23 +244,40 @@ class Attribute:
         name_attr = Attribute("name", guard)
         kb.add(entity, name_attr.id, Value.from_str("Alice"))
     """
-    def __init__(self, label=None, *, id=None, is_id=False, schema=None):
+    def __init__(self, hex_id=None, *, name=None, schema=None, id=None):
+        """Create an Attribute.
+
+        Primary form — explicit hex ID (matches Rust attributes! macro):
+            title = ts.Attribute('EE18CEC15C18438A2FAB670E2E46E00C')
+
+        Derived form — name + schema derive the ID:
+            name = ts.Attribute(name='name', schema=ts.SCHEMA_SHORT_STRING)
+            friend = ts.Attribute(name='friend', schema=ts.SCHEMA_GENID)
+
+        Raw form — pass an Id directly:
+            attr = ts.Attribute(id=some_id)
+        """
         if id is not None:
             self.id = id
-        elif label is not None:
-            # Deterministic ID from attribute name.
+        elif hex_id is not None:
+            self.id = Id.hex(hex_id)
+        elif name is not None and schema is not None:
+            # Derive ID from name + schema using blake2b.
+            # This matches triblespace's Attribute::from_name pattern.
             import hashlib
-            h = hashlib.blake2b(label.encode(), digest_size=16).digest()
+            seed = name.encode() + schema.bytes()
+            h = hashlib.blake2b(seed, digest_size=16).digest()
+            self.id = Id(h)
+        elif name is not None:
+            # Default to ShortString schema.
+            import hashlib
+            seed = name.encode() + SCHEMA_SHORT_STRING.bytes()
+            h = hashlib.blake2b(seed, digest_size=16).digest()
             self.id = Id(h)
         else:
-            raise ValueError("provide label (for derived id) or id= (explicit)")
-        self.label = label
-        if schema is not None:
-            self.schema = schema
-        elif is_id:
-            self.schema = SCHEMA_GENID
-        else:
-            self.schema = SCHEMA_SHORT_STRING
+            raise ValueError("provide hex_id, name=, or id=")
+        self.label = name or (hex_id[:8] + '...' if hex_id else None)
+        self.schema = schema or SCHEMA_SHORT_STRING
 
     def __hash__(self):
         return hash(self.id.to_hex())
