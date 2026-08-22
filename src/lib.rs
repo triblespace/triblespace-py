@@ -13,17 +13,15 @@ use pyo3::{
     types::{PyBytes, PyType},
 };
 use triblespace::core as ts_core;
-use ts_core::metadata;
-use ts_core::id::IdOwner;
 use triblespace::prelude::*;
+use ts_core::id::IdOwner;
+use ts_core::inline::{encodings::UnknownInline, RawInline};
+use ts_core::metadata;
 use ts_core::query::{
-    constantconstraint::ConstantConstraint, Binding, Constraint, ContainsConstraint, Query,
-    TriblePattern, Variable, VariableId,
-    equalityconstraint::EqualityConstraint,
-    unionconstraint::UnionConstraint,
-    RegularPathConstraint, PathOp,
+    constantconstraint::ConstantConstraint, equalityconstraint::EqualityConstraint,
+    unionconstraint::UnionConstraint, Binding, Candidates, Constraint, ContainsConstraint,
+    Frontier, ProposalBuffer, Query, TriblePattern, Variable, VariableId,
 };
-use ts_core::value::{schemas::UnknownValue, RawValue};
 
 use hex::FromHex;
 
@@ -46,17 +44,15 @@ impl<T> Hash for PyPtrIdentity<T> {
 static TYPE_TO_ENTITY: LazyLock<Mutex<HashMap<PyPtrIdentity<PyType>, Id>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static TO_VALUE_CONVERTERS: LazyLock<Mutex<HashMap<(Id, Id), Py<PyAny>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+type ConverterMap = LazyLock<Mutex<HashMap<(Id, Id), Py<PyAny>>>>;
 
-static FROM_VALUE_CONVERTERS: LazyLock<Mutex<HashMap<(Id, Id), Py<PyAny>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static TO_VALUE_CONVERTERS: ConverterMap = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static TO_BLOB_CONVERTERS: LazyLock<Mutex<HashMap<(Id, Id), Py<PyAny>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static FROM_VALUE_CONVERTERS: ConverterMap = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static FROM_BLOB_CONVERTERS: LazyLock<Mutex<HashMap<(Id, Id), Py<PyAny>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static TO_BLOB_CONVERTERS: ConverterMap = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static FROM_BLOB_CONVERTERS: ConverterMap = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[pyfunction]
 pub fn get_value_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<PyId> {
@@ -64,7 +60,7 @@ pub fn get_value_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<PyId>
     match find!((value_schema: Id),
     pattern!(&*data, [
         {&(attr_id.0) @
-            metadata::value_schema: ?value_schema}
+            metadata::value_encoding: ?value_schema}
     ]))
     .exactly_one()
     {
@@ -86,17 +82,15 @@ pub fn get_blob_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<Option
     match find!((blob_schema: Id),
     pattern!(&*data, [
         {&(attr_id.0) @
-            metadata::blob_schema: ?blob_schema}
+            metadata::blob_encoding: ?blob_schema}
     ]))
     .at_most_one()
     {
         Ok(None) => Ok(None),
         Ok(Some((schema_id,))) => Ok(Some(PyId(schema_id))),
-        Err(results) => match results.count() {
-            _ => Err(PyErr::new::<PyKeyError, _>(
-                "multiple blob schemas for attribute",
-            )),
-        },
+        Err(_) => Err(PyErr::new::<PyKeyError, _>(
+            "multiple blob schemas for attribute",
+        )),
     }
 }
 
@@ -106,11 +100,11 @@ pub fn get_blob_schema(context: &PyTribleSet, attr_id: &PyId) -> PyResult<Option
 #[pyfunction]
 pub fn get_label_name_handles(context: &PyTribleSet) -> PyResult<Vec<(PyId, String)>> {
     let data = context.0.lock();
-    use ts_core::value::Value;
-    use ts_core::value::schemas::hash::{Blake3, Handle};
-    use ts_core::blob::schemas::longstring::LongString;
+    use ts_core::blob::encodings::utf8string::UTF8String;
+    use ts_core::inline::encodings::hash::Handle;
+    use ts_core::inline::Inline;
     let results: Vec<(PyId, String)> = find!(
-        (attr_id: Id, name_handle: Value<Handle<Blake3, LongString>>),
+        (attr_id: Id, name_handle: Inline<Handle<UTF8String>>),
         pattern!(&*data, [{
             ?attr_id @
             metadata::name: ?name_handle
@@ -138,7 +132,7 @@ pub fn register_to_value_converter(
         let Some(entity) = type_to_entity.get(&PyPtrIdentity(typ)) else {
             return Err(PyErr::new::<PyKeyError, _>("no such type registered"));
         };
-        entity.clone()
+        *entity
     };
     TO_VALUE_CONVERTERS
         .lock()
@@ -157,7 +151,7 @@ pub fn register_from_value_converter(
         let Some(entity) = type_to_entity.get(&PyPtrIdentity(typ)) else {
             return Err(PyErr::new::<PyKeyError, _>("no such type registered"));
         };
-        entity.clone()
+        *entity
     };
     FROM_VALUE_CONVERTERS
         .lock()
@@ -176,7 +170,7 @@ pub fn register_to_blob_converter(
         let Some(entity) = type_to_entity.get(&PyPtrIdentity(typ)) else {
             return Err(PyErr::new::<PyKeyError, _>("no such type registered"));
         };
-        entity.clone()
+        *entity
     };
     TO_BLOB_CONVERTERS
         .lock()
@@ -195,7 +189,7 @@ pub fn register_from_blob_converter(
         let Some(entity) = type_to_entity.get(&PyPtrIdentity(typ)) else {
             return Err(PyErr::new::<PyKeyError, _>("no such type registered"));
         };
-        entity.clone()
+        *entity
     };
     FROM_BLOB_CONVERTERS
         .lock()
@@ -241,7 +235,7 @@ impl PyId {
         Ok(PyId(id))
     }
 
-    pub fn bytes(&self) -> Cow<[u8]> {
+    pub fn bytes(&self) -> Cow<'_, [u8]> {
         Cow::Borrowed(self.0.as_ref())
     }
 
@@ -382,7 +376,7 @@ impl PyIdOwnerGuard {
 
 #[pyclass(frozen, name = "Value")]
 pub struct PyValue {
-    value: RawValue,
+    value: RawInline,
     _value_schema: Id,
     _blob_schema: Option<Id>,
 }
@@ -399,7 +393,11 @@ impl PyValue {
         raw.copy_from_slice(bytes);
         // Use a dummy schema for raw values.
         let dummy_schema = Id::new([0xFF; 16]).unwrap();
-        Ok(PyValue { value: raw, _value_schema: dummy_schema, _blob_schema: None })
+        Ok(PyValue {
+            value: raw,
+            _value_schema: dummy_schema,
+            _blob_schema: None,
+        })
     }
 
     #[pyo3(signature = (value, value_schema, blob_schema=None))]
@@ -418,7 +416,7 @@ impl PyValue {
             let Some(entity) = type_to_entity.get(&PyPtrIdentity(typ)) else {
                 return Err(PyErr::new::<PyKeyError, _>("no such type registered"));
             };
-            entity.clone()
+            *entity
         };
         let converters = TO_VALUE_CONVERTERS.lock();
         let Some(converter) = converters.get(&(value_schema, type_id)) else {
@@ -428,7 +426,7 @@ impl PyValue {
         };
         let bytes = converter.call(py, (value,), None)?;
         let bytes = bytes.downcast_bound::<PyBytes>(py)?;
-        let value: RawValue = bytes.as_bytes().try_into()?;
+        let value: RawInline = bytes.as_bytes().try_into()?;
         Ok(Self {
             value,
             _value_schema: value_schema,
@@ -442,7 +440,7 @@ impl PyValue {
             let Some(entity) = type_to_entity.get(&PyPtrIdentity(typ)) else {
                 return Err(PyErr::new::<PyKeyError, _>("no such type registered"));
             };
-            entity.clone()
+            *entity
         };
         let converters = FROM_VALUE_CONVERTERS.lock();
         let Some(converter) = converters.get(&(self._value_schema, type_id)) else {
@@ -459,7 +457,7 @@ impl PyValue {
     }
 
     pub fn blob_schema(&self) -> Option<PyId> {
-        self._blob_schema.map(|s| PyId(s))
+        self._blob_schema.map(PyId)
     }
 
     pub fn is_handle(&self) -> bool {
@@ -480,10 +478,9 @@ impl PyValue {
     /// Create a Value from a short string (max 31 bytes UTF-8).
     #[staticmethod]
     fn from_str(s: &str) -> PyResult<Self> {
-        let val: Value<valueschemas::ShortString> = TryToValue::try_to_value(s)
+        let val: Inline<inlineencodings::ShortString> = TryToInline::try_to_inline(s)
             .map_err(|_| PyValueError::new_err("string too long for ShortString (max 31 bytes)"))?;
-        // Use a well-known schema ID for ShortString.
-        let schema_id = <valueschemas::ShortString as ConstId>::ID;
+        let schema_id = inlineencodings::ShortString::id();
         Ok(PyValue {
             value: val.raw,
             _value_schema: schema_id,
@@ -493,8 +490,8 @@ impl PyValue {
 
     /// Extract a short string from this Value.
     fn to_str(&self) -> PyResult<String> {
-        let val = Value::<valueschemas::ShortString>::new(self.value);
-        let s: String = TryFromValue::try_from_value(&val)
+        let val = Inline::<inlineencodings::ShortString>::new(self.value);
+        let s: String = TryFromInline::try_from_inline(&val)
             .map_err(|_| PyValueError::new_err("not a valid ShortString"))?;
         Ok(s)
     }
@@ -505,7 +502,7 @@ impl PyValue {
         let mut raw = [0u8; 32];
         let id_bytes: [u8; 16] = id.0.into();
         raw[16..32].copy_from_slice(&id_bytes);
-        let schema_id = <valueschemas::GenId as ConstId>::ID;
+        let schema_id = inlineencodings::GenId::id();
         Ok(PyValue {
             value: raw,
             _value_schema: schema_id,
@@ -515,8 +512,8 @@ impl PyValue {
 
     /// Extract an Id from this Value (GenId schema).
     fn to_id(&self) -> PyResult<PyId> {
-        let val = Value::<valueschemas::GenId>::new(self.value);
-        let id: Id = TryFromValue::try_from_value(&val)
+        let val = Inline::<inlineencodings::GenId>::new(self.value);
+        let id: Id = TryFromInline::try_from_inline(&val)
             .map_err(|_| PyValueError::new_err("not a valid GenId"))?;
         Ok(PyId(id))
     }
@@ -524,18 +521,18 @@ impl PyValue {
     /// Create a Value from an f64 (F64 schema — 8-byte LE in first 8 bytes).
     #[staticmethod]
     fn from_f64(v: f64) -> Self {
-        let val: Value<valueschemas::F64> = ToValue::to_value(v);
+        let val: Inline<inlineencodings::F64> = IntoInline::to_inline(v);
         PyValue {
             value: val.raw,
-            _value_schema: <valueschemas::F64 as ConstId>::ID,
+            _value_schema: inlineencodings::F64::id(),
             _blob_schema: None,
         }
     }
 
     /// Extract an f64 from this Value (F64 schema).
     fn to_f64(&self) -> PyResult<f64> {
-        let val = Value::<valueschemas::F64>::new(self.value);
-        let v: f64 = TryFromValue::try_from_value(&val)
+        let val = Inline::<inlineencodings::F64>::new(self.value);
+        let v: f64 = TryFromInline::try_from_inline(&val)
             .map_err(|_| PyValueError::new_err("not a valid F64"))?;
         Ok(v)
     }
@@ -543,18 +540,18 @@ impl PyValue {
     /// Create a Value from a bool (Boolean schema).
     #[staticmethod]
     fn from_bool(v: bool) -> Self {
-        let val: Value<valueschemas::Boolean> = ToValue::to_value(v);
+        let val: Inline<inlineencodings::Boolean> = IntoInline::to_inline(v);
         PyValue {
             value: val.raw,
-            _value_schema: <valueschemas::Boolean as ConstId>::ID,
+            _value_schema: inlineencodings::Boolean::id(),
             _blob_schema: None,
         }
     }
 
     /// Extract a bool from this Value (Boolean schema).
     fn to_bool(&self) -> PyResult<bool> {
-        let val = Value::<valueschemas::Boolean>::new(self.value);
-        let v: bool = TryFromValue::try_from_value(&val)
+        let val = Inline::<inlineencodings::Boolean>::new(self.value);
+        let v: bool = TryFromInline::try_from_inline(&val)
             .map_err(|e| PyValueError::new_err(format!("not a valid Boolean: {e:?}")))?;
         Ok(v)
     }
@@ -567,7 +564,11 @@ impl PyValue {
         }
         let mut raw = [0u8; 32];
         raw.copy_from_slice(bytes);
-        Ok(PyValue { value: raw, _value_schema: schema.id, _blob_schema: None })
+        Ok(PyValue {
+            value: raw,
+            _value_schema: schema.id,
+            _blob_schema: None,
+        })
     }
 
     /// Get raw 32-byte value.
@@ -578,22 +579,22 @@ impl PyValue {
     fn __repr__(&self) -> String {
         let schema = self._value_schema;
         // Schema-aware repr
-        if schema == <valueschemas::ShortString as ConstId>::ID {
+        if schema == inlineencodings::ShortString::id() {
             if let Ok(s) = self.to_str() {
                 return format!("Value({s:?})");
             }
         }
-        if schema == <valueschemas::GenId as ConstId>::ID {
+        if schema == inlineencodings::GenId::id() {
             if let Ok(id) = self.to_id() {
                 return format!("Value(Id({}))", &id.to_hex()[..8]);
             }
         }
-        if schema == <valueschemas::F64 as ConstId>::ID {
+        if schema == inlineencodings::F64::id() {
             if let Ok(v) = self.to_f64() {
                 return format!("Value({v})");
             }
         }
-        if schema == <valueschemas::Boolean as ConstId>::ID {
+        if schema == inlineencodings::Boolean::id() {
             if let Ok(v) = self.to_bool() {
                 return format!("Value({v})");
             }
@@ -612,13 +613,19 @@ impl PyValue {
         format!("Value(0x{})", hex::encode(&self.value[..8]))
     }
 
-    pub fn bytes(&self) -> Cow<[u8]> {
+    pub fn bytes(&self) -> Cow<'_, [u8]> {
         (&self.value).into()
     }
 }
 
 #[pyclass(frozen, name = "TribleSet")]
 pub struct PyTribleSet(Mutex<TribleSet>);
+
+impl Default for PyTribleSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[pymethods]
 impl PyTribleSet {
@@ -661,7 +668,7 @@ impl PyTribleSet {
             &(Trible::new(
                 ExclusiveId::force_ref(&e.0),
                 &a.0,
-                Value::<UnknownValue>::as_transmute_raw(&v.value),
+                Inline::<UnknownInline>::as_transmute_raw(&v.value),
             )),
         );
         Ok(())
@@ -691,7 +698,11 @@ impl PyTribleSet {
             result.push((
                 PyId(e),
                 PyId(a),
-                PyValue { value: v_raw, _value_schema: dummy, _blob_schema: None },
+                PyValue {
+                    value: v_raw,
+                    _value_schema: dummy,
+                    _blob_schema: None,
+                },
             ));
         }
         result
@@ -707,7 +718,7 @@ impl PyTribleSet {
             constraint: Arc::new(self.0.lock().pattern(
                 Variable::new(ev.0.read().index),
                 Variable::new(av.0.read().index),
-                Variable::<UnknownValue>::new(vv.0.read().index),
+                Variable::<UnknownInline>::new(vv.0.read().index),
             )),
         }
     }
@@ -717,7 +728,7 @@ impl PyTribleSet {
         let trible = Trible::new(
             ExclusiveId::force_ref(&e.0),
             &a.0,
-            Value::<UnknownValue>::as_transmute_raw(&v.value),
+            Inline::<UnknownInline>::as_transmute_raw(&v.value),
         );
         self.0.lock().contains(&trible)
     }
@@ -776,9 +787,9 @@ impl PyTribleSet {
     ) -> PyConstraint {
         PyConstraint {
             constraint: Arc::new(self.0.lock().value_in_range(
-                Variable::<UnknownValue>::new(variable.0.read().index),
-                Value::<UnknownValue>::new(min.value),
-                Value::<UnknownValue>::new(max.value),
+                Variable::<UnknownInline>::new(variable.0.read().index),
+                Inline::<UnknownInline>::new(min.value),
+                Inline::<UnknownInline>::new(max.value),
             )),
         }
     }
@@ -792,7 +803,7 @@ impl PyTribleSet {
     ) -> PyConstraint {
         PyConstraint {
             constraint: Arc::new(self.0.lock().entity_in_range(
-                Variable::<valueschemas::GenId>::new(variable.0.read().index),
+                Variable::<inlineencodings::GenId>::new(variable.0.read().index),
                 min.0,
                 max.0,
             )),
@@ -808,7 +819,7 @@ impl PyTribleSet {
     ) -> PyConstraint {
         PyConstraint {
             constraint: Arc::new(self.0.lock().attribute_in_range(
-                Variable::<valueschemas::GenId>::new(variable.0.read().index),
+                Variable::<inlineencodings::GenId>::new(variable.0.read().index),
                 min.0,
                 max.0,
             )),
@@ -818,22 +829,14 @@ impl PyTribleSet {
 
 // ── Pile (persistent storage) ─────────────────────────────────────────
 
+use ts_core::inline::encodings::hash::Handle;
 use ts_core::repo::pile::Pile;
-use ts_core::repo::{
-    BlobStore, BlobStoreGet, BlobStorePut, BranchStore, Repository, Workspace,
-    CommitHandle, CommitSet,
-    ancestors as repo_ancestors, parents as repo_parents,
-    nth_ancestors as repo_nth_ancestors, symmetric_diff as repo_symmetric_diff,
-    union as repo_selector_union, intersect as repo_selector_intersect,
-    difference as repo_selector_difference,
-};
-use ts_core::value::schemas::hash::{Blake3, Handle};
-use ts_core::blob::schemas::simplearchive::SimpleArchive;
+use ts_core::repo::{BlobStore, BlobStoreGet, BlobStorePut};
 
 #[pyclass(name = "Pile")]
 pub struct PyPile {
     path: String,
-    pile: Mutex<Option<Pile<Blake3>>>,
+    pile: Mutex<Option<Pile>>,
 }
 
 #[pymethods]
@@ -848,106 +851,37 @@ impl PyPile {
             std::fs::File::create(path)
                 .map_err(|e| PyRuntimeError::new_err(format!("create: {e}")))?;
         }
-        let pile = Pile::<Blake3>::open(path)
-            .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
-        Ok(PyPile { path: path_str, pile: Mutex::new(Some(pile)) })
+        let pile = Pile::open(path).map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
+        Ok(PyPile {
+            path: path_str,
+            pile: Mutex::new(Some(pile)),
+        })
     }
 
     /// Close the pile, flushing pending writes.
     fn close(&self) -> PyResult<()> {
-        let pile = self.pile.lock().take()
+        let pile = self
+            .pile
+            .lock()
+            .take()
             .ok_or_else(|| PyRuntimeError::new_err("pile already closed"))?;
-        pile.close().map_err(|e| PyRuntimeError::new_err(format!("close: {e:?}")))?;
-        Ok(())
-    }
-
-    /// Checkout a branch by name, returning its TribleSet.
-    fn checkout(&self, branch_name: &str) -> PyResult<PyTribleSet> {
-        // Take the pile out temporarily — Repository needs ownership.
-        let pile = self.pile.lock().take()
-            .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
-        let mut repo = Repository::new(pile, signing_key, TribleSet::new())
-            .map_err(|e| PyRuntimeError::new_err(format!("repo: {e:?}")))?;
-        let bid = repo.ensure_branch(branch_name, None)
-            .map_err(|e| PyRuntimeError::new_err(format!("branch: {e:?}")))?;
-        let mut ws = repo.pull(bid)
-            .map_err(|e| PyRuntimeError::new_err(format!("pull: {e:?}")))?;
-        let head = ws.head().ok_or_else(|| PyRuntimeError::new_err("branch has no commits"))?;
-        let co = ws.checkout(ts_core::repo::ancestors(head))
-            .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
-        let result = co.into_facts();
-        // Put the pile back.
-        *self.pile.lock() = Some(repo.into_storage());
-        Ok(PyTribleSet(Mutex::new(result)))
-    }
-
-    /// List all branch names.
-    fn branches(&self) -> PyResult<Vec<String>> {
-        let mut guard = self.pile.lock();
-        let pile = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
-
-        let branch_ids: Vec<Id> = pile.branches()
-            .map_err(|e| PyRuntimeError::new_err(format!("branches: {e:?}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        let mut names = Vec::new();
-        for bid in branch_ids {
-            let Some(head) = pile.head(bid)
-                .map_err(|e| PyRuntimeError::new_err(format!("head: {e:?}")))? else { continue };
-
-            let reader = pile.reader()
-                .map_err(|e| PyRuntimeError::new_err(format!("reader: {e:?}")))?;
-            let Ok(meta) = reader.get::<TribleSet, SimpleArchive>(head) else { continue };
-
-            use ts_core::blob::schemas::longstring::LongString;
-            use ts_core::value::schemas::hash::Handle;
-            let name_handle = find!(
-                h: Value<Handle<Blake3, LongString>>,
-                pattern!(&meta, [{ _?e @ ts_core::metadata::name: ?h }])
-            ).next();
-            let Some(nh) = name_handle else { continue };
-            let Ok(name_view) = reader.get::<anybytes::View<str>, LongString>(nh) else { continue };
-            names.push(name_view.as_ref().to_string());
-        }
-        Ok(names)
-    }
-
-    /// Commit a TribleSet to a branch. Creates the branch if it doesn't exist.
-    fn commit(&self, branch_name: &str, data: &PyTribleSet) -> PyResult<()> {
-        let pile = self.pile.lock().take()
-            .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]);
-        let mut repo = Repository::new(pile, signing_key, TribleSet::new())
-            .map_err(|e| PyRuntimeError::new_err(format!("repo: {e:?}")))?;
-        let bid = repo.ensure_branch(branch_name, None)
-            .map_err(|e| PyRuntimeError::new_err(format!("branch: {e:?}")))?;
-        let mut ws = repo.pull(bid)
-            .map_err(|e| PyRuntimeError::new_err(format!("pull: {e:?}")))?;
-
-        // Create a commit with the data.
-        let data_set = data.0.lock().clone();
-        ws.commit(data_set, "python commit");
-        repo.push(&mut ws)
-            .map_err(|_| PyRuntimeError::new_err("push failed"))?;
-
-        *self.pile.lock() = Some(repo.into_storage());
+        pile.close()
+            .map_err(|e| PyRuntimeError::new_err(format!("close: {e:?}")))?;
         Ok(())
     }
 
     /// Read a blob by its handle value. Returns bytes or None.
     fn get_blob(&self, py: Python<'_>, handle: &PyValue) -> PyResult<Option<Py<PyBytes>>> {
         let mut guard = self.pile.lock();
-        let pile = guard.as_mut()
+        let pile = guard
+            .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
-        let reader = pile.reader()
+        let reader = pile
+            .reader()
             .map_err(|e| PyRuntimeError::new_err(format!("reader: {e:?}")))?;
-        use ts_core::blob::schemas::UnknownBlob;
-        use ts_core::value::schemas::hash::Handle;
-        let handle_val = Value::<Handle<Blake3, UnknownBlob>>::new(handle.value);
-        match reader.get::<anybytes::Bytes, UnknownBlob>(handle_val) {
+        use ts_core::blob::encodings::rawbytes::RawBytes;
+        let handle_val = Inline::<Handle<RawBytes>>::new(handle.value);
+        match reader.get::<anybytes::Bytes, RawBytes>(handle_val) {
             Ok(bytes) => Ok(Some(PyBytes::new(py, bytes.as_ref()).into())),
             Err(_) => Ok(None),
         }
@@ -956,48 +890,51 @@ impl PyPile {
     /// Store bytes as a blob, returning its blake3 handle.
     fn put_blob(&self, data: &[u8]) -> PyResult<PyValue> {
         let mut guard = self.pile.lock();
-        let pile = guard.as_mut()
+        let pile = guard
+            .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
-        use ts_core::blob::schemas::UnknownBlob;
-        use ts_core::value::schemas::hash::Handle;
-        let blob = ts_core::blob::Blob::<UnknownBlob>::new(data.to_vec().into());
-        let handle: Value<Handle<Blake3, UnknownBlob>> = pile.put(blob)
+        use ts_core::blob::encodings::rawbytes::RawBytes;
+        let blob = ts_core::blob::Blob::<RawBytes>::new(data.to_vec().into());
+        let handle: Inline<Handle<RawBytes>> = pile
+            .put(blob)
             .map_err(|e| PyRuntimeError::new_err(format!("put: {e:?}")))?;
         Ok(PyValue {
             value: handle.raw,
-            _value_schema: <Handle<Blake3, UnknownBlob> as ConstId>::ID,
-            _blob_schema: Some(<UnknownBlob as ConstId>::ID),
+            _value_schema: Handle::<RawBytes>::id(),
+            _blob_schema: Some(RawBytes::id()),
         })
     }
 
-    /// Store a string as a LongString blob, returning its handle.
+    /// Store a string as a UTF8String blob, returning its handle.
     fn put_string(&self, s: &str) -> PyResult<PyValue> {
         let mut guard = self.pile.lock();
-        let pile = guard.as_mut()
+        let pile = guard
+            .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
-        use ts_core::blob::schemas::longstring::LongString;
-        use ts_core::value::schemas::hash::Handle;
-        let blob = ts_core::blob::Blob::<LongString>::new(s.to_string().into());
-        let handle: Value<Handle<Blake3, LongString>> = pile.put(blob)
+        use ts_core::blob::encodings::utf8string::UTF8String;
+        let blob = ts_core::blob::Blob::<UTF8String>::new(s.to_string().into());
+        let handle: Inline<Handle<UTF8String>> = pile
+            .put(blob)
             .map_err(|e| PyRuntimeError::new_err(format!("put: {e:?}")))?;
         Ok(PyValue {
             value: handle.raw,
-            _value_schema: <Handle<Blake3, LongString> as ConstId>::ID,
-            _blob_schema: Some(<LongString as ConstId>::ID),
+            _value_schema: Handle::<UTF8String>::id(),
+            _blob_schema: Some(UTF8String::id()),
         })
     }
 
-    /// Read a LongString blob by its handle, returning as string.
+    /// Read a UTF8String blob by its handle, returning as string.
     fn get_string(&self, handle: &PyValue) -> PyResult<Option<String>> {
         let mut guard = self.pile.lock();
-        let pile = guard.as_mut()
+        let pile = guard
+            .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("pile is closed"))?;
-        let reader = pile.reader()
+        let reader = pile
+            .reader()
             .map_err(|e| PyRuntimeError::new_err(format!("reader: {e:?}")))?;
-        use ts_core::blob::schemas::longstring::LongString;
-        use ts_core::value::schemas::hash::Handle;
-        let handle_val = Value::<Handle<Blake3, LongString>>::new(handle.value);
-        match reader.get::<anybytes::View<str>, LongString>(handle_val) {
+        use ts_core::blob::encodings::utf8string::UTF8String;
+        let handle_val = Inline::<Handle<UTF8String>>::new(handle.value);
+        match reader.get::<anybytes::View<str>, UTF8String>(handle_val) {
             Ok(view) => Ok(Some(view.as_ref().to_string())),
             Err(_) => Ok(None),
         }
@@ -1007,7 +944,13 @@ impl PyPile {
         slf
     }
 
-    fn __exit__(&self, _exc_type: Option<&Bound<'_, PyAny>>, _exc_val: Option<&Bound<'_, PyAny>>, _exc_tb: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __exit__(
+        &self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_val: Option<&Bound<'_, PyAny>>,
+        _exc_tb: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
         if let Some(pile) = self.pile.lock().take() {
             let _ = pile.close();
         }
@@ -1021,551 +964,6 @@ impl PyPile {
             format!("Pile({:?}, closed)", self.path)
         }
     }
-}
-
-// ── Repository / Workspace / CommitSet / Checkout ─────────────────────
-
-type PileBlake3 = Pile<Blake3>;
-
-/// A Repository wraps a Pile with branch/commit/workspace operations.
-#[pyclass(name = "Repository")]
-pub struct PyRepository {
-    path: String,
-    repo: Mutex<Option<Repository<PileBlake3>>>,
-}
-
-#[pymethods]
-impl PyRepository {
-    /// Open or create a Repository at the given pile path.
-    ///
-    /// `signing_key`: optional 32-byte ed25519 signing key. Defaults to a
-    /// dummy zero key (commits will be unsigned).
-    #[new]
-    #[pyo3(signature = (path, signing_key=None))]
-    fn new(path: &str, signing_key: Option<&[u8]>) -> PyResult<Self> {
-        let path_str = path.to_string();
-        let path_obj = std::path::Path::new(path);
-        if !path_obj.exists() {
-            std::fs::File::create(path_obj)
-                .map_err(|e| PyRuntimeError::new_err(format!("create: {e}")))?;
-        }
-        let pile = Pile::<Blake3>::open(path_obj)
-            .map_err(|e| PyRuntimeError::new_err(format!("open: {e:?}")))?;
-        let key_bytes: [u8; 32] = match signing_key {
-            Some(b) => b.try_into()
-                .map_err(|_| PyValueError::new_err("signing key must be exactly 32 bytes"))?,
-            None => [0u8; 32],
-        };
-        let key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-        let repo = Repository::new(pile, key, TribleSet::new())
-            .map_err(|e| PyRuntimeError::new_err(format!("repository: {e:?}")))?;
-        Ok(PyRepository { path: path_str, repo: Mutex::new(Some(repo)) })
-    }
-
-    /// Pull a workspace for the given branch (creates the branch if missing).
-    fn pull(&self, branch_name: &str) -> PyResult<PyWorkspace> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        let bid = repo.ensure_branch(branch_name, None)
-            .map_err(|e| PyRuntimeError::new_err(format!("ensure_branch: {e:?}")))?;
-        let ws = repo.pull(bid)
-            .map_err(|e| PyRuntimeError::new_err(format!("pull: {e:?}")))?;
-        Ok(PyWorkspace { ws: Mutex::new(Some(ws)) })
-    }
-
-    /// Pull a workspace by branch ID directly.
-    fn pull_by_id(&self, branch_id: &PyId) -> PyResult<PyWorkspace> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        let ws = repo.pull(branch_id.0)
-            .map_err(|e| PyRuntimeError::new_err(format!("pull: {e:?}")))?;
-        Ok(PyWorkspace { ws: Mutex::new(Some(ws)) })
-    }
-
-    /// Create a new named branch (errors if it already exists).
-    /// `from_commit` optionally initializes the branch at a specific commit.
-    /// Returns the new branch's id.
-    #[pyo3(signature = (branch_name, from_commit=None))]
-    fn create_branch(&self, branch_name: &str, from_commit: Option<&PyValue>) -> PyResult<PyId> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        let commit = from_commit.map(|v| Value::<Handle<Blake3, SimpleArchive>>::new(v.value));
-        let bid = repo.create_branch(branch_name, commit)
-            .map_err(|e| PyRuntimeError::new_err(format!("create_branch: {e:?}")))?;
-        Ok(PyId(*bid))
-    }
-
-    /// Push a workspace to the repo. Auto-retries on conflict by merging.
-    fn push(&self, workspace: &PyWorkspace) -> PyResult<()> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        let mut ws_guard = workspace.ws.lock();
-        let ws = ws_guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        repo.push(ws).map_err(|e| PyRuntimeError::new_err(format!("push: {e:?}")))?;
-        Ok(())
-    }
-
-    /// Single-attempt CAS push.
-    /// Returns None on success, or a conflict workspace if the branch advanced.
-    /// The conflict workspace has the new branch state — merge your changes
-    /// into it and try_push again.
-    fn try_push(&self, workspace: &PyWorkspace) -> PyResult<Option<PyWorkspace>> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        let mut ws_guard = workspace.ws.lock();
-        let ws = ws_guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let conflict = repo.try_push(ws)
-            .map_err(|e| PyRuntimeError::new_err(format!("try_push: {e:?}")))?;
-        Ok(conflict.map(|cws| PyWorkspace { ws: Mutex::new(Some(cws)) }))
-    }
-
-    /// List all branch IDs in the repository.
-    fn branch_ids(&self) -> PyResult<Vec<PyId>> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        // Repository doesn't expose branches directly; use the storage.
-        let storage = repo.storage_mut();
-        let bids: Vec<Id> = storage.branches()
-            .map_err(|e| PyRuntimeError::new_err(format!("branches: {e:?}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(bids.into_iter().map(PyId).collect())
-    }
-
-    /// List all branches as (name, id) tuples. Branches without names are skipped.
-    fn branches(&self) -> PyResult<Vec<(String, PyId)>> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        let storage = repo.storage_mut();
-        let bids: Vec<Id> = storage.branches()
-            .map_err(|e| PyRuntimeError::new_err(format!("branches: {e:?}")))?
-            .filter_map(|r| r.ok())
-            .collect();
-        let mut result = Vec::new();
-        for bid in bids {
-            let Some(meta_handle) = storage.head(bid)
-                .map_err(|e| PyRuntimeError::new_err(format!("head: {e:?}")))? else { continue };
-            let reader = storage.reader()
-                .map_err(|e| PyRuntimeError::new_err(format!("reader: {e:?}")))?;
-            let Ok(meta) = reader.get::<TribleSet, SimpleArchive>(meta_handle) else { continue };
-            use ts_core::blob::schemas::longstring::LongString;
-            let name_handle = find!(
-                h: Value<Handle<Blake3, LongString>>,
-                pattern!(&meta, [{ _?e @ ts_core::metadata::name: ?h }])
-            ).next();
-            let Some(nh) = name_handle else { continue };
-            let Ok(name_view) = reader.get::<anybytes::View<str>, LongString>(nh) else { continue };
-            result.push((name_view.as_ref().to_string(), PyId(bid)));
-        }
-        Ok(result)
-    }
-
-    /// Get the current head commit handle of a branch by name. Returns None if the branch has no commits.
-    fn branch_head(&self, branch_name: &str) -> PyResult<Option<PyValue>> {
-        let mut guard = self.repo.lock();
-        let repo = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("repository is closed"))?;
-        let bid = repo.ensure_branch(branch_name, None)
-            .map_err(|e| PyRuntimeError::new_err(format!("ensure_branch: {e:?}")))?;
-        let ws = repo.pull(bid)
-            .map_err(|e| PyRuntimeError::new_err(format!("pull: {e:?}")))?;
-        Ok(ws.head().map(|h| PyValue {
-            value: h.raw,
-            _value_schema: <Handle<Blake3, SimpleArchive> as ConstId>::ID,
-            _blob_schema: Some(<SimpleArchive as ConstId>::ID),
-        }))
-    }
-
-    fn close(&self) -> PyResult<()> {
-        let repo = self.repo.lock().take()
-            .ok_or_else(|| PyRuntimeError::new_err("already closed"))?;
-        let pile = repo.into_storage();
-        pile.close().map_err(|e| PyRuntimeError::new_err(format!("close: {e:?}")))?;
-        Ok(())
-    }
-
-    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> { slf }
-
-    fn __exit__(&self, _et: Option<&Bound<'_, PyAny>>, _ev: Option<&Bound<'_, PyAny>>, _tb: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
-        if let Some(repo) = self.repo.lock().take() {
-            let _ = repo.into_storage().close();
-        }
-        Ok(false)
-    }
-
-    fn __repr__(&self) -> String {
-        if self.repo.lock().is_some() {
-            format!("Repository({:?})", self.path)
-        } else {
-            format!("Repository({:?}, closed)", self.path)
-        }
-    }
-}
-
-/// A Workspace is a local mutable view of a branch with staged commits.
-#[pyclass(name = "Workspace")]
-pub struct PyWorkspace {
-    ws: Mutex<Option<Workspace<PileBlake3>>>,
-}
-
-#[pymethods]
-impl PyWorkspace {
-    /// The current head commit handle (None if no commits).
-    #[getter]
-    fn head(&self) -> PyResult<Option<PyValue>> {
-        let guard = self.ws.lock();
-        let ws = guard.as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        Ok(ws.head().map(|h| PyValue {
-            value: h.raw,
-            _value_schema: <Handle<Blake3, SimpleArchive> as ConstId>::ID,
-            _blob_schema: Some(<SimpleArchive as ConstId>::ID),
-        }))
-    }
-
-    /// The branch ID this workspace is for.
-    #[getter]
-    fn branch_id(&self) -> PyResult<PyId> {
-        let guard = self.ws.lock();
-        let ws = guard.as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        Ok(PyId(ws.branch_id()))
-    }
-
-    /// Stage a commit with the given facts and message.
-    #[pyo3(signature = (facts, message=""))]
-    fn commit(&self, facts: &PyTribleSet, message: &str) -> PyResult<()> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let data = facts.0.lock().clone();
-        ws.commit(data, message);
-        Ok(())
-    }
-
-    /// Merge another workspace into this one. Creates a merge commit with
-    /// both heads as parents and copies all staged blobs.
-    fn merge(&self, other: &PyWorkspace) -> PyResult<Option<PyValue>> {
-        let mut self_guard = self.ws.lock();
-        let mut other_guard = other.ws.lock();
-        let ws = self_guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let other_ws = other_guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("other workspace is consumed"))?;
-        let handle = ws.merge(other_ws)
-            .map_err(|e| PyRuntimeError::new_err(format!("merge: {e:?}")))?;
-        Ok(Some(PyValue {
-            value: handle.raw,
-            _value_schema: <Handle<Blake3, SimpleArchive> as ConstId>::ID,
-            _blob_schema: Some(<SimpleArchive as ConstId>::ID),
-        }))
-    }
-
-    /// Get all facts reachable from the workspace's head as a TribleSet.
-    /// Convenience for `checkout(ancestors(head)).facts`.
-    #[getter]
-    fn facts(&self) -> PyResult<PyTribleSet> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let Some(head) = ws.head() else {
-            return Ok(PyTribleSet(Mutex::new(TribleSet::new())));
-        };
-        let co = ws.checkout(repo_ancestors(head))
-            .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
-        Ok(PyTribleSet(Mutex::new(co.into_facts())))
-    }
-
-    /// Checkout the facts at the given commits (handles, CommitSet, or list).
-    fn checkout(&self, spec: &Bound<'_, PyAny>) -> PyResult<PyCheckout> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let commits = pyobj_to_commitset(spec)?;
-        let co = ws.checkout(commits)
-            .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
-        Ok(PyCheckout {
-            facts: co.facts().clone(),
-            commits: co.commits(),
-        })
-    }
-
-    /// Compute all ancestors of the given commit (or workspace head).
-    #[pyo3(signature = (commit=None))]
-    fn ancestors(&self, commit: Option<&PyValue>) -> PyResult<PyCommitSet> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let start = match commit {
-            Some(v) => Value::<Handle<Blake3, SimpleArchive>>::new(v.value),
-            None => ws.head().ok_or_else(|| PyRuntimeError::new_err("no head"))?,
-        };
-        let co = ws.checkout(repo_ancestors(start))
-            .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
-        Ok(PyCommitSet { set: co.commits() })
-    }
-
-    /// Compute the direct parents of the given commit (or workspace head).
-    #[pyo3(signature = (commit=None))]
-    fn parents(&self, commit: Option<&PyValue>) -> PyResult<PyCommitSet> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let start = match commit {
-            Some(v) => Value::<Handle<Blake3, SimpleArchive>>::new(v.value),
-            None => ws.head().ok_or_else(|| PyRuntimeError::new_err("no head"))?,
-        };
-        let co = ws.checkout(repo_parents(start))
-            .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
-        Ok(PyCommitSet { set: co.commits() })
-    }
-
-    /// Walk back N parent steps from the given commit (or head).
-    #[pyo3(signature = (n, commit=None))]
-    fn nth_ancestors(&self, n: usize, commit: Option<&PyValue>) -> PyResult<PyCommitSet> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let start = match commit {
-            Some(v) => Value::<Handle<Blake3, SimpleArchive>>::new(v.value),
-            None => ws.head().ok_or_else(|| PyRuntimeError::new_err("no head"))?,
-        };
-        let co = ws.checkout(repo_nth_ancestors(start, n))
-            .map_err(|e| PyRuntimeError::new_err(format!("checkout: {e:?}")))?;
-        Ok(PyCommitSet { set: co.commits() })
-    }
-
-    /// Look up a blob by handle (UnknownBlob — raw bytes).
-    fn get_blob(&self, py: Python<'_>, handle: &PyValue) -> PyResult<Option<Py<PyBytes>>> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        use ts_core::blob::schemas::UnknownBlob;
-        let handle_val = Value::<Handle<Blake3, UnknownBlob>>::new(handle.value);
-        match ws.get::<anybytes::Bytes, UnknownBlob>(handle_val) {
-            Ok(bytes) => Ok(Some(PyBytes::new(py, bytes.as_ref()).into())),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Look up a LongString blob by handle.
-    fn get_string(&self, handle: &PyValue) -> PyResult<Option<String>> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        use ts_core::blob::schemas::longstring::LongString;
-        let handle_val = Value::<Handle<Blake3, LongString>>::new(handle.value);
-        match ws.get::<anybytes::View<str>, LongString>(handle_val) {
-            Ok(view) => Ok(Some(view.as_ref().to_string())),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Get the message string for a specific commit handle, or None if it has no message.
-    fn commit_message(&self, commit: &PyValue) -> PyResult<Option<String>> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let handle = Value::<Handle<Blake3, SimpleArchive>>::new(commit.value);
-        let meta: TribleSet = match ws.get::<TribleSet, SimpleArchive>(handle) {
-            Ok(m) => m,
-            Err(_) => return Ok(None),
-        };
-        use ts_core::blob::schemas::longstring::LongString;
-        let msg_handle = find!(
-            h: Value<Handle<Blake3, LongString>>,
-            pattern!(&meta, [{ _?e @ ts_core::repo::message: ?h }])
-        ).next();
-        let Some(mh) = msg_handle else { return Ok(None) };
-        match ws.get::<anybytes::View<str>, LongString>(mh) {
-            Ok(view) => Ok(Some(view.as_ref().to_string())),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Get the parent commit handles of a commit.
-    fn commit_parents(&self, commit: &PyValue) -> PyResult<Vec<PyValue>> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let handle = Value::<Handle<Blake3, SimpleArchive>>::new(commit.value);
-        let meta: TribleSet = match ws.get::<TribleSet, SimpleArchive>(handle) {
-            Ok(m) => m,
-            Err(_) => return Ok(vec![]),
-        };
-        let parents: Vec<_> = find!(
-            p: Value<Handle<Blake3, SimpleArchive>>,
-            pattern!(&meta, [{ _?e @ ts_core::repo::parent: ?p }])
-        ).collect();
-        Ok(parents.into_iter().map(|p| PyValue {
-            value: p.raw,
-            _value_schema: <Handle<Blake3, SimpleArchive> as ConstId>::ID,
-            _blob_schema: Some(<SimpleArchive as ConstId>::ID),
-        }).collect())
-    }
-
-    /// Get the raw commit metadata TribleSet — exposes all attributes
-    /// (parents, message, content, signed_by, timestamp, etc.) for custom queries.
-    fn commit_metadata(&self, commit: &PyValue) -> PyResult<PyTribleSet> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let handle = Value::<Handle<Blake3, SimpleArchive>>::new(commit.value);
-        let meta: TribleSet = ws.get::<TribleSet, SimpleArchive>(handle)
-            .map_err(|e| PyRuntimeError::new_err(format!("get commit: {e:?}")))?;
-        Ok(PyTribleSet(Mutex::new(meta)))
-    }
-
-    /// Get the content facts of a single commit.
-    fn commit_facts(&self, commit: &PyValue) -> PyResult<PyTribleSet> {
-        let mut guard = self.ws.lock();
-        let ws = guard.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("workspace is consumed"))?;
-        let handle = Value::<Handle<Blake3, SimpleArchive>>::new(commit.value);
-        let meta: TribleSet = ws.get::<TribleSet, SimpleArchive>(handle)
-            .map_err(|e| PyRuntimeError::new_err(format!("get commit: {e:?}")))?;
-        let content_handle = find!(
-            c: Value<Handle<Blake3, SimpleArchive>>,
-            pattern!(&meta, [{ _?e @ ts_core::repo::content: ?c }])
-        ).next();
-        let Some(ch) = content_handle else {
-            return Ok(PyTribleSet(Mutex::new(TribleSet::new())));
-        };
-        let content: TribleSet = ws.get::<TribleSet, SimpleArchive>(ch)
-            .map_err(|e| PyRuntimeError::new_err(format!("get content: {e:?}")))?;
-        Ok(PyTribleSet(Mutex::new(content)))
-    }
-
-    fn __repr__(&self) -> String {
-        let guard = self.ws.lock();
-        match guard.as_ref() {
-            Some(ws) => {
-                let head_str = ws.head().map(|h| {
-                    format!("{}", &hex::encode(&h.raw[..4]))
-                }).unwrap_or_else(|| "None".to_string());
-                format!("Workspace(head={head_str})")
-            }
-            None => "Workspace(consumed)".to_string(),
-        }
-    }
-}
-
-/// A set of commit handles. Supports union, intersection, difference operators.
-#[pyclass(name = "CommitSet")]
-pub struct PyCommitSet {
-    set: CommitSet,
-}
-
-#[pymethods]
-impl PyCommitSet {
-    fn __len__(&self) -> usize {
-        self.set.len() as usize
-    }
-
-    fn __bool__(&self) -> bool {
-        self.set.len() > 0
-    }
-
-    fn __iter__(slf: PyRef<'_, Self>, py: Python<'_>) -> Py<PyCommitSetIter> {
-        let handles: Vec<PyValue> = slf.set.iter().map(|raw| PyValue {
-            value: *raw,
-            _value_schema: <Handle<Blake3, SimpleArchive> as ConstId>::ID,
-            _blob_schema: Some(<SimpleArchive as ConstId>::ID),
-        }).collect();
-        Py::new(py, PyCommitSetIter {
-            handles: Mutex::new(handles.into_iter().collect::<std::collections::VecDeque<_>>()),
-        }).unwrap()
-    }
-
-    fn __or__(&self, other: &Self) -> Self {
-        let mut s = self.set.clone();
-        s.union(other.set.clone());
-        PyCommitSet { set: s }
-    }
-
-    fn __and__(&self, other: &Self) -> Self {
-        PyCommitSet { set: self.set.intersect(&other.set) }
-    }
-
-    fn __sub__(&self, other: &Self) -> Self {
-        PyCommitSet { set: self.set.difference(&other.set) }
-    }
-
-    fn __contains__(&self, handle: &PyValue) -> bool {
-        // CommitSet is a PATCH; check membership via has_prefix
-        self.set.has_prefix(&handle.value)
-    }
-
-    fn __repr__(&self) -> String {
-        format!("CommitSet({} commits)", self.set.len())
-    }
-}
-
-#[pyclass(name = "CommitSetIter")]
-pub struct PyCommitSetIter {
-    handles: Mutex<std::collections::VecDeque<PyValue>>,
-}
-
-#[pymethods]
-impl PyCommitSetIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> { slf }
-    fn __next__(&self) -> Option<PyValue> {
-        self.handles.lock().pop_front()
-    }
-}
-
-/// The result of a checkout: facts (TribleSet) + commits (CommitSet).
-#[pyclass(name = "Checkout")]
-pub struct PyCheckout {
-    facts: TribleSet,
-    commits: CommitSet,
-}
-
-#[pymethods]
-impl PyCheckout {
-    #[getter]
-    fn facts(&self) -> PyTribleSet {
-        PyTribleSet(Mutex::new(self.facts.clone()))
-    }
-
-    #[getter]
-    fn commits(&self) -> PyCommitSet {
-        PyCommitSet { set: self.commits.clone() }
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Checkout({} tribles, {} commits)", self.facts.len(), self.commits.len())
-    }
-}
-
-/// Convert a Python object to a CommitSet (accepts: PyValue/handle, PyCommitSet, list of either).
-fn pyobj_to_commitset(obj: &Bound<'_, PyAny>) -> PyResult<CommitSet> {
-    if let Ok(cs) = obj.extract::<PyRef<PyCommitSet>>() {
-        return Ok(cs.set.clone());
-    }
-    if let Ok(v) = obj.extract::<PyRef<PyValue>>() {
-        let mut set = CommitSet::new();
-        set.insert(&ts_core::patch::Entry::new(&v.value));
-        return Ok(set);
-    }
-    if let Ok(list) = obj.downcast::<pyo3::types::PyList>() {
-        let mut set = CommitSet::new();
-        for item in list.iter() {
-            let v = item.extract::<PyRef<PyValue>>()?;
-            set.insert(&ts_core::patch::Entry::new(&v.value));
-        }
-        return Ok(set);
-    }
-    Err(PyTypeError::new_err("expected Value, CommitSet, or list of Values"))
 }
 
 pub struct InnerVariable {
@@ -1642,6 +1040,12 @@ pub struct InnerVariableContext {
 #[pyclass(frozen, name = "VariableContext")]
 pub struct PyVariableContext(RwLock<InnerVariableContext>);
 
+impl Default for PyVariableContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[pymethods]
 impl PyVariableContext {
     #[new]
@@ -1660,7 +1064,7 @@ impl PyVariableContext {
         let variable = Py::new(py, PyVariable::new(next_index, name)).unwrap();
         variable_context.variables.push(variable.clone_ref(py));
 
-        return variable;
+        variable
     }
 
     pub fn check_schemas(&self) -> PyResult<()> {
@@ -1678,28 +1082,26 @@ impl PyVariableContext {
     }
 }
 
+type DynConstraint = Arc<dyn Constraint<'static> + Send + Sync>;
+type PyPostprocessor = Box<dyn Fn(&Binding<'_>) -> Option<Vec<PyValue>> + Send>;
+type InnerQuery = Query<DynConstraint, PyPostprocessor, Vec<PyValue>>;
+
 #[pyclass(frozen, name = "Query")]
 pub struct PyQuery {
-    query: Mutex<
-        Query<
-            Arc<dyn Constraint<'static> + Send + Sync>,
-            Box<dyn Fn(&Binding) -> Option<Vec<PyValue>> + Send>,
-            Vec<PyValue>,
-        >,
-    >,
+    query: Mutex<InnerQuery>,
 }
 
 #[pyclass(frozen)]
 pub struct PyConstraint {
-    constraint: Arc<dyn Constraint<'static> + Send + Sync>,
+    constraint: DynConstraint,
 }
 
 /// Build a constraint for the intersection of the provided constraints.
 #[pyfunction]
 pub fn constant(index: usize, constant: &Bound<'_, PyValue>) -> PyConstraint {
     let constraint = Arc::new(ConstantConstraint::new(
-        Variable::<UnknownValue>::new(index),
-        Value::<UnknownValue>::new(constant.get().value),
+        Variable::<UnknownInline>::new(index),
+        Inline::<UnknownInline>::new(constant.get().value),
     ));
 
     PyConstraint { constraint }
@@ -1722,10 +1124,7 @@ pub fn py_intersect(constraints: Vec<Py<PyConstraint>>) -> PyConstraint {
 #[pyfunction]
 pub fn equality(a: &PyVariable, b: &PyVariable) -> PyConstraint {
     PyConstraint {
-        constraint: Arc::new(EqualityConstraint::new(
-            a.0.read().index,
-            b.0.read().index,
-        )),
+        constraint: Arc::new(EqualityConstraint::new(a.0.read().index, b.0.read().index)),
     }
 }
 
@@ -1742,110 +1141,61 @@ pub fn py_union(constraints: Vec<Py<PyConstraint>>) -> PyConstraint {
     PyConstraint { constraint }
 }
 
-/// Build a path constraint for graph traversal.
-///
-/// ops is a list of path operations (postfix encoded):
-///   ("attr", Id)    — single attribute hop
-///   ("concat",)     — compose two preceding sub-expressions
-///   ("union",)      — match either of two preceding sub-expressions
-///   ("star",)       — zero or more repetitions
-///   ("plus",)       — one or more repetitions
-#[pyfunction]
-#[pyo3(name = "path")]
-pub fn py_path(
-    kb: &PyTribleSet,
-    start: &PyVariable,
-    end: &PyVariable,
-    ops: Vec<(String, Option<PyId>)>,
-) -> PyResult<PyConstraint> {
-    let ops: Vec<PathOp> = ops.iter().map(|(name, id)| {
-        match name.as_str() {
-            "attr" => {
-                let id = id.as_ref().expect("attr op requires an Id").0;
-                PathOp::Attr(id.raw())
-            }
-            "concat" => PathOp::Concat,
-            "union" => PathOp::Union,
-            "star" => PathOp::Star,
-            "plus" => PathOp::Plus,
-            other => panic!("unknown path op: {other}"),
-        }
-    }).collect();
-    Ok(PyConstraint {
-        constraint: Arc::new(RegularPathConstraint::new(
-            kb.0.lock().clone(),
-            Variable::<valueschemas::GenId>::new(start.0.read().index),
-            Variable::<valueschemas::GenId>::new(end.0.read().index),
-            &ops,
-        )),
-    })
-}
-
 /// Constrain a variable to values in the given set.
 #[pyfunction]
 pub fn value_set(variable: &PyVariable, values: Vec<Py<PyValue>>) -> PyConstraint {
     use std::collections::HashSet;
     let index = variable.0.read().index;
-    let raw_values: HashSet<RawValue> = values.iter().map(|v| v.get().value).collect();
+    let raw_values: HashSet<RawInline> = values.iter().map(|v| v.get().value).collect();
     PyConstraint {
-        constraint: Arc::new(RawValueSetConstraint { index, values: raw_values }),
+        constraint: Arc::new(RawInlineSetConstraint {
+            index,
+            values: raw_values,
+        }),
     }
 }
 
-/// Hide variables from the outer query — like Rust's ignore!() macro.
-#[pyfunction]
-#[pyo3(name = "ignore")]
-pub fn py_ignore(variables: Vec<Py<PyVariable>>, constraint: &PyConstraint) -> PyConstraint {
-    let mut ignored = ts_core::query::VariableSet::new_empty();
-    for v in &variables {
-        ignored.set(v.get().0.read().index);
-    }
-    let inner = constraint.constraint.clone();
-    PyConstraint {
-        constraint: Arc::new(PyIgnoreConstraint { ignored, inner }),
-    }
-}
-
-struct PyIgnoreConstraint {
-    ignored: ts_core::query::VariableSet,
-    inner: Arc<dyn Constraint<'static> + Send + Sync>,
-}
-
-impl<'a> Constraint<'a> for PyIgnoreConstraint {
-    fn variables(&self) -> ts_core::query::VariableSet {
-        self.inner.variables().difference(self.ignored)
-    }
-    fn estimate(&self, variable: VariableId, binding: &Binding) -> Option<usize> {
-        self.inner.estimate(variable, binding)
-    }
-    fn propose(&self, variable: VariableId, binding: &Binding, proposals: &mut Vec<RawValue>) {
-        self.inner.propose(variable, binding, proposals)
-    }
-    fn confirm(&self, variable: VariableId, binding: &Binding, proposals: &mut Vec<RawValue>) {
-        self.inner.confirm(variable, binding, proposals)
-    }
-}
-
-struct RawValueSetConstraint {
+struct RawInlineSetConstraint {
     index: VariableId,
-    values: std::collections::HashSet<RawValue>,
+    values: std::collections::HashSet<RawInline>,
 }
 
-impl<'a> Constraint<'a> for RawValueSetConstraint {
+impl<'a> Constraint<'a> for RawInlineSetConstraint {
     fn variables(&self) -> ts_core::query::VariableSet {
         ts_core::query::VariableSet::new_singleton(self.index)
     }
     fn estimate(&self, variable: VariableId, _binding: &Binding) -> Option<usize> {
-        if self.index == variable { Some(self.values.len()) } else { None }
-    }
-    fn propose(&self, variable: VariableId, _binding: &Binding, proposals: &mut Vec<RawValue>) {
         if self.index == variable {
-            proposals.extend(self.values.iter().copied());
+            Some(self.values.len())
+        } else {
+            None
         }
     }
-    fn confirm(&self, variable: VariableId, _binding: &Binding, proposals: &mut Vec<RawValue>) {
+    fn propose(
+        &self,
+        variable: VariableId,
+        frontier: &Frontier<'_>,
+        proposals: &mut ProposalBuffer,
+    ) {
         if self.index == variable {
-            proposals.retain(|v| self.values.contains(v));
+            for row in 0..frontier.len() {
+                proposals.open(row as u32);
+                proposals.extend(self.values.iter().copied());
+            }
+        }
+    }
+    fn confirm(
+        &self,
+        variable: VariableId,
+        _frontier: &Frontier<'_>,
+        candidates: &mut Candidates<'_>,
+    ) {
+        if self.index == variable {
+            for i in 0..candidates.len() {
+                if candidates.is_live(i) && !self.values.contains(&candidates.values()[i]) {
+                    candidates.kill(i);
+                }
+            }
         }
     }
 }
@@ -1874,7 +1224,7 @@ pub fn solve(projected: Vec<Py<PyVariable>>, constraint: &PyConstraint) -> PyRes
             });
         }
         Some(vec)
-    }) as Box<dyn Fn(&Binding) -> Option<Vec<PyValue>> + Send>;
+    }) as PyPostprocessor;
 
     let query = ts_core::query::Query::new(constraint, postprocessing);
 
@@ -1900,10 +1250,11 @@ fn py_blake3(py: Python<'_>, data: &[u8]) -> Py<PyBytes> {
     PyBytes::new(py, digest.as_bytes()).into()
 }
 
-/// A schema type — wraps the ConstId from Rust.
+/// A schema type — wraps a TribleSpace encoding identity.
 ///
 /// Leaf schemas (GenId, ShortString, etc.) are module-level singletons.
-/// Compound schemas are built with Handle(hash_schema, blob_schema).
+/// Compound handle schemas are built with Handle(blob_schema). TribleSpace's
+/// content-addressing hash is fixed to Blake3.
 #[pyclass(name = "Schema", frozen)]
 #[derive(Clone)]
 pub struct PySchema {
@@ -1913,7 +1264,7 @@ pub struct PySchema {
 
 #[pymethods]
 impl PySchema {
-    /// The schema's ConstId.
+    /// The encoding's stable TribleSpace identity.
     #[getter]
     fn id(&self) -> PyId {
         PyId(self.id)
@@ -1950,62 +1301,133 @@ impl PySchema {
     }
 }
 
-fn derive_handle_id(hash_id: Id, blob_id: Id) -> Id {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&hash_id.raw());
-    hasher.update(&blob_id.raw());
-    let digest = hasher.finalize();
-    let bytes = digest.as_bytes();
-    let mut raw = [0u8; 16];
-    raw.copy_from_slice(&bytes[16..32]);
-    Id::new(raw).expect("derived handle schema id must be non-nil")
-}
-
-/// Build a Handle schema from a hash schema and a blob schema.
+/// Build a typed Handle schema for a blob encoding.
 #[pyfunction]
 #[pyo3(name = "Handle")]
-fn py_handle(hash_schema: &PySchema, blob_schema: &PySchema) -> PySchema {
+fn py_handle(blob_schema: &PySchema) -> PySchema {
+    let descriptor = entity! {
+        metadata::blob_encoding: &blob_schema.id,
+        metadata::hash_schema: &inlineencodings::Blake3::id(),
+        metadata::tag: &metadata::KIND_INLINE_ENCODING,
+    };
     PySchema {
-        id: derive_handle_id(hash_schema.id, blob_schema.id),
-        label: format!("Handle<{}, {}>", hash_schema.label, blob_schema.label),
+        id: descriptor.root().expect("handle descriptor is rooted"),
+        label: format!("Handle<{}>", blob_schema.label),
     }
 }
 
 macro_rules! schema_const {
     ($id:expr, $label:expr) => {
-        PySchema { id: ts_core::id_hex!($id), label: String::from($label) }
+        PySchema {
+            id: ts_core::id_hex!($id),
+            label: String::from($label),
+        }
     };
 }
 
-static SCHEMAS: LazyLock<Vec<(&str, PySchema)>> = LazyLock::new(|| vec![
-    // Value schemas
-    ("GenId",            schema_const!("B08EE1D45EB081E8C47618178AFE0D81", "GenId")),
-    ("ShortString",      schema_const!("2D848DB0AF112DB226A6BF1A3640D019", "ShortString")),
-    ("F64",              schema_const!("C80A60F4A6F2FBA5A8DB2531A923EC70", "F64")),
-    ("Boolean",          schema_const!("73B414A3E25B0C0F9E4D6B0694DC33C5", "Boolean")),
-    ("NsTAIInterval",    schema_const!("2170014368272A2B1B18B86B1F1F1CB5", "NsTAIInterval")),
-    ("U256LE",           schema_const!("49E70B4DBD84DC7A3E0BDDABEC8A8C6E", "U256LE")),
-    ("U256BE",           schema_const!("DC3CFB719B05F019FB8101A6F471A982", "U256BE")),
-    ("I256LE",           schema_const!("DB94325A37D96037CBFC6941A4C3B66D", "I256LE")),
-    ("I256BE",           schema_const!("CE3A7839231F1EB390E9E8E13DAED782", "I256BE")),
-    ("R256LE",           schema_const!("0A9B43C5C2ECD45B257CDEFC16544358", "R256LE")),
-    ("R256BE",           schema_const!("CA5EAF567171772C1FFD776E9C7C02D1", "R256BE")),
-    ("F256LE",           schema_const!("D9A419D3CAA0D8E05D8DAB950F5E80F2", "F256LE")),
-    ("F256BE",           schema_const!("A629176D4656928D96B155038F9F2220", "F256BE")),
-    ("LineLocation",     schema_const!("DFAED173A908498CB893A076EAD3E578", "LineLocation")),
-    ("ED25519PublicKey", schema_const!("69A872254E01B4C1ED36E08E40445E93", "ED25519PublicKey")),
-    ("ED25519RComponent",schema_const!("995A86FFC83DB95ECEAA17E226208897", "ED25519RComponent")),
-    ("ED25519SComponent",schema_const!("10D35B0B628E9E409C549D8EC1FB3598", "ED25519SComponent")),
-    ("UnknownValue",     schema_const!("4EC697E8599AC79D667C722E2C8BEBF4", "UnknownValue")),
-    // Hash protocol schemas
-    ("Blake3",           schema_const!("4160218D6C8F620652ECFBD7FDC7BDB3", "Blake3")),
-    // Blob schemas
-    ("LongString",       schema_const!("8B173C65B7DB601A11E8A190BD774A79", "LongString")),
-    ("SimpleArchive",    schema_const!("8F4A27C8581DADCBA1ADA8BA228069B6", "SimpleArchive")),
-    ("FileBytes",        schema_const!("5DE76157AE4FDEA830019916805E80A4", "FileBytes")),
-    ("WasmCode",         schema_const!("DEE50FAD0CFFA4F8FD542DD18D9B7E52", "WasmCode")),
-    ("UnknownBlob",      schema_const!("EAB14005141181B0C10C4B5DD7985F8D", "UnknownBlob")),
-]);
+static SCHEMAS: LazyLock<Vec<(&str, PySchema)>> = LazyLock::new(|| {
+    vec![
+        // Value schemas
+        (
+            "GenId",
+            schema_const!("B08EE1D45EB081E8C47618178AFE0D81", "GenId"),
+        ),
+        (
+            "ShortString",
+            schema_const!("2D848DB0AF112DB226A6BF1A3640D019", "ShortString"),
+        ),
+        (
+            "F64",
+            schema_const!("C80A60F4A6F2FBA5A8DB2531A923EC70", "F64"),
+        ),
+        (
+            "Boolean",
+            schema_const!("73B414A3E25B0C0F9E4D6B0694DC33C5", "Boolean"),
+        ),
+        (
+            "NsTAIInterval",
+            schema_const!("2170014368272A2B1B18B86B1F1F1CB5", "NsTAIInterval"),
+        ),
+        (
+            "U256LE",
+            schema_const!("49E70B4DBD84DC7A3E0BDDABEC8A8C6E", "U256LE"),
+        ),
+        (
+            "U256BE",
+            schema_const!("DC3CFB719B05F019FB8101A6F471A982", "U256BE"),
+        ),
+        (
+            "I256LE",
+            schema_const!("DB94325A37D96037CBFC6941A4C3B66D", "I256LE"),
+        ),
+        (
+            "I256BE",
+            schema_const!("CE3A7839231F1EB390E9E8E13DAED782", "I256BE"),
+        ),
+        (
+            "R256LE",
+            schema_const!("0A9B43C5C2ECD45B257CDEFC16544358", "R256LE"),
+        ),
+        (
+            "R256BE",
+            schema_const!("CA5EAF567171772C1FFD776E9C7C02D1", "R256BE"),
+        ),
+        (
+            "F256LE",
+            schema_const!("D9A419D3CAA0D8E05D8DAB950F5E80F2", "F256LE"),
+        ),
+        (
+            "F256BE",
+            schema_const!("A629176D4656928D96B155038F9F2220", "F256BE"),
+        ),
+        (
+            "LineLocation",
+            schema_const!("DFAED173A908498CB893A076EAD3E578", "LineLocation"),
+        ),
+        (
+            "ED25519PublicKey",
+            schema_const!("69A872254E01B4C1ED36E08E40445E93", "ED25519PublicKey"),
+        ),
+        (
+            "ED25519RComponent",
+            schema_const!("995A86FFC83DB95ECEAA17E226208897", "ED25519RComponent"),
+        ),
+        (
+            "ED25519SComponent",
+            schema_const!("10D35B0B628E9E409C549D8EC1FB3598", "ED25519SComponent"),
+        ),
+        (
+            "UnknownInline",
+            schema_const!("4EC697E8599AC79D667C722E2C8BEBF4", "UnknownInline"),
+        ),
+        // Hash protocol schemas
+        (
+            "Blake3",
+            schema_const!("4160218D6C8F620652ECFBD7FDC7BDB3", "Blake3"),
+        ),
+        // Blob schemas
+        (
+            "UTF8String",
+            schema_const!("8B173C65B7DB601A11E8A190BD774A79", "UTF8String"),
+        ),
+        (
+            "SimpleArchive",
+            schema_const!("8F4A27C8581DADCBA1ADA8BA228069B6", "SimpleArchive"),
+        ),
+        (
+            "RawBytes",
+            schema_const!("4C1BA1EB2FDCC637C2F269A46FCA2398", "RawBytes"),
+        ),
+        (
+            "WasmCode",
+            schema_const!("DEE50FAD0CFFA4F8FD542DD18D9B7E52", "WasmCode"),
+        ),
+        (
+            "UnknownBlob",
+            schema_const!("EAB14005141181B0C10C4B5DD7985F8D", "UnknownBlob"),
+        ),
+    ]
+});
 
 /// The `tribles` python module.
 #[pymodule]
@@ -2020,11 +1442,6 @@ pub fn triblespace_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyQuery>()?;
     m.add_class::<PyPile>()?;
-    m.add_class::<PyRepository>()?;
-    m.add_class::<PyWorkspace>()?;
-    m.add_class::<PyCommitSet>()?;
-    m.add_class::<PyCommitSetIter>()?;
-    m.add_class::<PyCheckout>()?;
     m.add_class::<PySchema>()?;
     m.add_function(wrap_pyfunction!(py_blake3, m)?)?;
     m.add_function(wrap_pyfunction!(py_handle, m)?)?;
@@ -2044,10 +1461,73 @@ pub fn triblespace_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_intersect, m)?)?;
     m.add_function(wrap_pyfunction!(equality, m)?)?;
     m.add_function(wrap_pyfunction!(py_union, m)?)?;
-    m.add_function(wrap_pyfunction!(py_path, m)?)?;
     m.add_function(wrap_pyfunction!(value_set, m)?)?;
-    m.add_function(wrap_pyfunction!(py_ignore, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_submodule(m)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema(name: &str) -> Id {
+        SCHEMAS
+            .iter()
+            .find_map(|(candidate, schema)| (*candidate == name).then_some(schema.id))
+            .expect("registered Python encoding")
+    }
+
+    #[test]
+    fn registered_encoding_ids_match_the_native_types() {
+        assert_eq!(schema("GenId"), inlineencodings::GenId::id());
+        assert_eq!(schema("ShortString"), inlineencodings::ShortString::id());
+        assert_eq!(schema("F64"), inlineencodings::F64::id());
+        assert_eq!(schema("Boolean"), inlineencodings::Boolean::id());
+        assert_eq!(
+            schema("NsTAIInterval"),
+            inlineencodings::NsTAIInterval::id()
+        );
+        assert_eq!(schema("U256LE"), inlineencodings::U256LE::id());
+        assert_eq!(schema("U256BE"), inlineencodings::U256BE::id());
+        assert_eq!(schema("I256LE"), inlineencodings::I256LE::id());
+        assert_eq!(schema("I256BE"), inlineencodings::I256BE::id());
+        assert_eq!(schema("R256LE"), inlineencodings::R256LE::id());
+        assert_eq!(schema("R256BE"), inlineencodings::R256BE::id());
+        assert_eq!(schema("F256LE"), inlineencodings::F256LE::id());
+        assert_eq!(schema("F256BE"), inlineencodings::F256BE::id());
+        assert_eq!(schema("LineLocation"), inlineencodings::LineLocation::id());
+        assert_eq!(
+            schema("ED25519PublicKey"),
+            inlineencodings::ED25519PublicKey::id()
+        );
+        assert_eq!(
+            schema("ED25519RComponent"),
+            inlineencodings::ED25519RComponent::id()
+        );
+        assert_eq!(
+            schema("ED25519SComponent"),
+            inlineencodings::ED25519SComponent::id()
+        );
+        assert_eq!(schema("UnknownInline"), UnknownInline::id());
+        assert_eq!(schema("Blake3"), inlineencodings::Blake3::id());
+        assert_eq!(schema("UTF8String"), blobencodings::UTF8String::id());
+        assert_eq!(schema("SimpleArchive"), blobencodings::SimpleArchive::id());
+        assert_eq!(schema("RawBytes"), blobencodings::RawBytes::id());
+        assert_eq!(schema("WasmCode"), blobencodings::WasmCode::id());
+        assert_eq!(schema("UnknownBlob"), blobencodings::UnknownBlob::id());
+    }
+
+    #[test]
+    fn dynamic_handle_schema_matches_the_native_descriptor() {
+        let raw_bytes = PySchema {
+            id: blobencodings::RawBytes::id(),
+            label: "RawBytes".to_owned(),
+        };
+
+        assert_eq!(
+            py_handle(&raw_bytes).id,
+            Handle::<blobencodings::RawBytes>::id()
+        );
+    }
 }

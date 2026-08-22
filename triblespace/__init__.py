@@ -29,23 +29,21 @@ from .triblespace import *
 from .triblespace import (
     TribleSet, Id, IdOwner, Value, Variable, VariableContext,
     PyConstraint as Constraint, Query, Schema, Pile,
-    Repository, Workspace, CommitSet, Checkout,
     constant, intersect, solve,
-    equality, union, path, value_set,
-    ignore as ignore_vars,
+    equality, union, value_set,
     get_value_schema, get_blob_schema, get_label_name_handles,
     metadata_description,
     register_type, register_to_value_converter, register_from_value_converter,
     register_to_blob_converter, register_from_blob_converter,
     py_blake3 as blake3,
     Handle,
-    # Leaf schema singletons (from Rust ConstId impls).
+    # Leaf encoding singletons.
     GenId, ShortString, F64, Boolean, NsTAIInterval,
     U256LE, U256BE, I256LE, I256BE, R256LE, R256BE, F256LE, F256BE,
     LineLocation, ED25519PublicKey, ED25519RComponent, ED25519SComponent,
-    UnknownValue,
+    UnknownInline,
     Blake3 as Blake3Schema,
-    LongString, SimpleArchive, FileBytes, WasmCode, UnknownBlob,
+    UTF8String, SimpleArchive, RawBytes, WasmCode, UnknownBlob,
 )
 
 # ── Variable + Constraint combinators ─────────────────────────────────
@@ -115,63 +113,6 @@ class ConstraintBuilder:
 
     def __repr__(self):
         return f"Constraint(...)"
-
-class Path:
-    """Builder for graph path expressions (regular path constraints).
-
-    Path expressions describe graph traversals:
-        # Single attribute hop
-        p = Path.attr(friend)
-
-        # Concatenation: follow friend then name
-        p = Path.attr(friend) >> Path.attr(name)
-
-        # Alternation: either friend or colleague
-        p = Path.attr(friend) | Path.attr(colleague)
-
-        # Transitive closure: one or more hops
-        p = Path.attr(friend).plus()
-
-        # Reflexive-transitive closure: zero or more hops
-        p = Path.attr(friend).star()
-
-    Use with kb.path_where():
-        c = kb.path_where(start, end, Path.attr(friend).plus())
-    """
-    __slots__ = ('_ops',)
-
-    def __init__(self, ops):
-        self._ops = ops
-
-    @staticmethod
-    def attr(attribute):
-        """Single attribute hop."""
-        if isinstance(attribute, Attribute):
-            aid = attribute.id
-        elif isinstance(attribute, Id):
-            aid = attribute
-        else:
-            raise TypeError(f"expected Attribute or Id, got {type(attribute).__name__}")
-        return Path([("attr", aid)])
-
-    def __rshift__(self, other):
-        """Concatenation: self >> other."""
-        return Path(self._ops + other._ops + [("concat", None)])
-
-    def __or__(self, other):
-        """Alternation: self | other."""
-        return Path(self._ops + other._ops + [("union", None)])
-
-    def plus(self):
-        """Transitive closure (one or more repetitions)."""
-        return Path(self._ops + [("plus", None)])
-
-    def star(self):
-        """Reflexive-transitive closure (zero or more repetitions)."""
-        return Path(self._ops + [("star", None)])
-
-    def __repr__(self):
-        return f"Path({len(self._ops)} ops)"
 
 
 class Fragment:
@@ -271,22 +212,6 @@ TribleSet.where = _tribleset_where
 TribleSet.__iter__ = lambda self: iter(self.triples())
 
 
-def _tribleset_path_where(self, start, end, path_expr):
-    """Build a path constraint for graph traversal.
-
-        c = kb.path_where(start_var, end_var, Path.attr(friend).plus())
-    """
-    sv, sc = _ensure_var(start)
-    ev, ec = _ensure_var(end)
-    pat = path(self, sv, ev, path_expr._ops)
-    all_constraints = [pat] + sc + ec
-    if len(all_constraints) == 1:
-        return ConstraintBuilder(all_constraints[0])
-    return ConstraintBuilder(intersect(all_constraints))
-
-
-TribleSet.path_where = _tribleset_path_where
-
 
 def exists(constraint):
     """Check if any solutions exist for the constraint. Short-circuits."""
@@ -339,33 +264,6 @@ def _patched_consume(self, other):
 TribleSet.consume = _patched_consume
 
 
-# ── Workspace history walker ─────────────────────────────────────────
-
-def _workspace_history(self, start=None):
-    """Walk commits in topological order from head (or `start`) backwards.
-
-    Yields commit handles. Each commit is visited after all its descendants.
-    Useful for log-style display.
-    """
-    seen = set()
-    head = start if start is not None else self.head
-    if head is None:
-        return
-    # BFS over parents
-    queue = [head]
-    while queue:
-        commit = queue.pop(0)
-        key = bytes(commit.raw_bytes())
-        if key in seen:
-            continue
-        seen.add(key)
-        yield commit
-        for parent in self.commit_parents(commit):
-            queue.append(parent)
-
-Workspace.history = _workspace_history
-
-
 _original_schema_attribute_id = Schema._attribute_id
 
 def _schema_attribute(self, name):
@@ -394,7 +292,7 @@ class Attribute:
         # Derived from name via Schema.attribute():
         name = ts.ShortString.attribute('name')
         friend = ts.GenId.attribute('friend')
-        desc = ts.Handle(ts.Blake3Schema, ts.LongString).attribute('description')
+        desc = ts.Handle(ts.UTF8String).attribute('description')
     """
     __slots__ = ('id', 'label', 'schema')
 
@@ -509,10 +407,10 @@ def mint_id():
 class _Metadata:
     """Canonical metadata attributes from triblespace-core."""
     def __init__(self):
-        hbl = Handle(Blake3Schema, LongString)
+        hbl = Handle(UTF8String)
         self.description = Attribute('AE94660A55D2EE3C428D2BB299E02EC3', schema=hbl)
-        self.value_schema = Attribute('213F89E3F49628A105B3830BD3A6612C', schema=GenId)
-        self.blob_schema = Attribute('43C134652906547383054B1E31E23DF4', schema=GenId)
+        self.value_encoding = Attribute('213F89E3F49628A105B3830BD3A6612C', schema=GenId)
+        self.blob_encoding = Attribute('43C134652906547383054B1E31E23DF4', schema=GenId)
         self.hash_schema = Attribute('51C08CFABB2C848CE0B4A799F0EFE5EA', schema=GenId)
         self.name = Attribute('7FB28C0B48E1924687857310EE230414', schema=hbl)
         self.attribute = Attribute('F10DE6D8E60E0E86013F1B867173A85C', schema=GenId)
@@ -528,25 +426,6 @@ class _Metadata:
 
 metadata = _Metadata()
 
-
-class _CommitAttrs:
-    """Canonical commit metadata attributes from triblespace-core::repo."""
-    def __init__(self):
-        hba = Handle(Blake3Schema, SimpleArchive)
-        hbl = Handle(Blake3Schema, LongString)
-        self.content = Attribute('4DD4DDD05CC31734B03ABB4E43188B1F', schema=hba)
-        self.metadata = Attribute('88B59BD497540AC5AECDB7518E737C87', schema=hba)
-        self.parent = Attribute('317044B612C690000D798CA660ECFD2A', schema=hba)
-        self.message = Attribute('B59D147839100B6ED4B165DF76EDF3BB', schema=hbl)
-        self.short_message = Attribute('12290C0BE0E9207E324F24DDE0D89300', schema=ShortString)
-        self.head = Attribute('272FBC56108F336C4D2E17289468C35F', schema=hba)
-        self.branch = Attribute('8694CC73AF96A5E1C7635C677D1B928A', schema=GenId)
-        self.timestamp = Attribute('71FF566AB4E3119FC2C5E66A18979586', schema=NsTAIInterval)
-        self.signed_by = Attribute('ADB4FFAD247C886848161297EFF5A05B', schema=ED25519PublicKey)
-        self.signature_r = Attribute('9DF34F84959928F93A3C40AEB6E9E499', schema=ED25519RComponent)
-        self.signature_s = Attribute('1ACE03BF70242B289FDF00E4327C3BC6', schema=ED25519SComponent)
-
-commit = _CommitAttrs()
 
 
 def _coerce_value(val, attr=None):
